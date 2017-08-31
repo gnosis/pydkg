@@ -80,7 +80,7 @@ class ECDKG(db.Base):
         return ecdkg_obj
 
 
-    async def run_until_phase(self, target_phase):
+    async def run_until_phase(self, target_phase: ECDKGPhase):
         while self.phase < target_phase:
             logging.info('handling {} phase...'.format(self.phase.name))
             await getattr(self, 'handle_{}_phase'.format(self.phase.name))()
@@ -145,7 +145,7 @@ class ECDKG(db.Base):
 
             if share1 is not None and share2 is not None:
                 vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
-                                        secp256k1.multiply(G2, share2))
+                                     secp256k1.multiply(G2, share2))
                 vrhs = functools.reduce(secp256k1.add, (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N)) for k, ps in enumerate(participant.verification_points)))
 
                 if vlhs != vrhs:
