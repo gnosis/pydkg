@@ -45,7 +45,7 @@ def validate_polynomial(polynomial: int):
 def validate_curve_point(point: (int, int)):
     if (any(coord < 0 or coord >= secp256k1.P for coord in point) or
         pow(point[1], 2, secp256k1.P) != (pow(point[0], 3, secp256k1.P) + 7) % secp256k1.P
-       ) and point != (0, 0): # (0, 0) is used to represent group identity
+       ) and point != (0, 0): # (0, 0) is used to represent group identity element
         raise ValueError('invalid EC point {}'.format(point))
 
 
@@ -67,13 +67,13 @@ def validate_signature(signature: 'rsv triplet'):
 
 
 def private_value_to_bytes(value: int) -> bytes:
-    util.validate_private_value(value)
+    validate_private_value(value)
     return value.to_bytes(32, byteorder='big')
 
 
 def bytes_to_private_value(bts: bytes) -> int:
     priv = int.from_bytes(bts, byteorder='big')
-    util.validate_private_value(priv)
+    validate_private_value(priv)
     return priv
 
 
@@ -132,6 +132,21 @@ def get_locations(filepath: str) -> list:
 
 def random_private_value() -> int:
     return random.randrange(secp256k1.N)
+
+
+def address_from_bytes_and_signature(bts: bytes, signature: 'rsv triplet') -> int:
+    if len(bts) != 32:
+        raise ValueError('bytes must have length 32 but got {} ({})'.format(len(bts), bts))
+
+    (r, s, v) = signature
+
+    pubkey = secp256k1.ecdsa_raw_recover(bts, (v, r, s))
+
+    if not pubkey:
+        raise ValueError('ECDSA public key recovery failed with bytes {} and signature {}'.format(bts, signature))
+
+    return curve_point_to_eth_address(pubkey)
+
 
 
 def normalize_decryption_condition(deccond: str, return_obj: bool = False):

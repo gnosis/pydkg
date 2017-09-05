@@ -115,8 +115,8 @@ class ECDKG(db.Base):
         for participant in self.participants:
             address = participant.eth_address
 
-            if address in secret_shares:
-                (share1, share2), rsv = secret_shares[address]
+            if address in signed_secret_shares:
+                (share1, share2), rsv = signed_secret_shares[address]
 
                 # TODO: Check signature is valid here
 
@@ -164,8 +164,8 @@ class ECDKG(db.Base):
 
 
     async def handle_key_check_phase(self):
-        complaints = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_complaints', self.decryption_condition)
+        # complaints = await networking.broadcast_jsonrpc_call_on_all_channels(
+        #     'get_complaints', self.decryption_condition)
 
         self.phase = ECDKGPhase.key_generation
         db.Session.commit()
@@ -236,7 +236,7 @@ class ECDKG(db.Base):
 
         msg_hash = sha3.keccak_256(b''.join(util.private_value_to_bytes(s) for s in secret_shares)).digest()
 
-        signature = secp256k1.ecdsa_raw_sign(msg_hash, private_key)
+        signature = secp256k1.ecdsa_raw_sign(msg_hash, util.private_value_to_bytes(private_key))
 
         return (secret_shares, signature)
 
@@ -288,6 +288,3 @@ class ECDKGParticipant(db.Base):
                 msg[attr] = '{0[0]:064x}{0[1]:064x}'.format(val)
 
         return msg
-
-
-class ECDKGComplaint(db.Base):
