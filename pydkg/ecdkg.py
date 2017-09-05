@@ -234,9 +234,9 @@ class ECDKG(db.Base):
         secret_shares = (eval_polynomial(self.secret_poly1, address),
                          eval_polynomial(self.secret_poly2, address))
 
-        msg_hash = sha3.keccak_256(b''.join(util.private_value_to_bytes(s) for s in secret_shares)).digest()
+        msg_bytes = b''.join(util.private_value_to_bytes(s) for s in secret_shares)
 
-        signature = secp256k1.ecdsa_raw_sign(msg_hash, util.private_value_to_bytes(private_key))
+        signature = util.sign_with_key(msg_bytes, private_key)
 
         return (secret_shares, signature)
 
