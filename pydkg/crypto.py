@@ -38,8 +38,7 @@ def encrypt(message: bytes, enckey: (int, int)) -> bytes:
 
 def decrypt(ciphertext: bytes, deckey: int, foo=False) -> bytes:
     util.validate_private_value(deckey)
-    R = tuple(int.from_bytes(ciphertext[i:i+32], byteorder='big') for i in (0, 32))
-    util.validate_curve_point(R)
+    R = util.bytes_to_curve_point(ciphertext[:64])
     S = secp256k1.multiply(R, deckey)
     num_trunc_bytes = ord(ciphertext[64:65])
     iv = ciphertext[65:97]

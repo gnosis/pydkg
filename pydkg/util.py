@@ -77,12 +77,42 @@ def bytes_to_private_value(bts: bytes) -> int:
     return priv
 
 
+def bytes_to_curve_point(bts: bytes) -> (int, int):
+    if len(bts) != 64:
+        raise ValueError('unexpected length {} bytes'.format(len(bts)))
+    point = tuple(int.from_bytes(bts[i:i+32], byteorder='big') for i in (0, 32))
+    validate_curve_point(point)
+    return point
+
+
 def bytes_to_signature(bts: bytes) -> 'rsv triplet':
     if len(bts) != 65:
         raise ValueError('unexpected length {} bytes'.format(len(bts)))
     signature = tuple(int.from_bytes(bs, byteorder='big') for bs in (bts[0:32], bts[32:64], bts[64:]))
     validate_signature(signature)
     return signature
+
+
+def bytes_to_address(bts: bytes) -> int:
+    if len(bts) != 20:
+        raise ValueError('unexpected length {} bytes'.format(len(bts)))
+    addr = int.from_bytes(bts, byteorder='big')
+    validate_eth_address(addr)
+    return addr
+
+
+def bytes_to_polynomial(bts: bytes) -> tuple:
+    if len(bts) % 32 != 0:
+        raise ValueError('length {} not divisible by 32 bytes'.format(len(bts)))
+    polynomial = tuple(int.from_bytes(bts[i:i+32], byteorder='big') for i in range(0, len(bts), 32))
+    validate_polynomial(polynomial)
+    return polynomial
+
+
+def bytes_to_curve_point_tuple(bts: bytes) -> tuple:
+    if len(bts) % 64 != 0:
+        raise ValueError('length {} not divisible by 64 bytes'.format(len(bts)))
+    return tuple(bytes_to_curve_point(bts[i:i+64]) for i in range(0, len(bts), 64))
 
 
 def sequence_256_bit_values_to_bytes(sequence: tuple) -> bytes:

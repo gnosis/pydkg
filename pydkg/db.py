@@ -51,12 +51,7 @@ class CurvePoint(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            if len(value) != 64:
-                raise ValueError('unexpected result value length {} bytes'.format(len(value)))
-            point = tuple(int.from_bytes(value[i:i+32], byteorder='big') for i in (0, 32))
-            util.validate_curve_point(point)
-            return point
-
+            return util.bytes_to_curve_point(value)
 
 class Signature(types.TypeDecorator):
     impl = types.LargeBinary
@@ -82,9 +77,7 @@ class EthAddress(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            addr = int.from_bytes(value, byteorder='big')
-            util.validate_eth_address(addr)
-            return addr
+            return util.bytes_to_address(value)
 
 
 class Polynomial(types.TypeDecorator):
@@ -98,11 +91,7 @@ class Polynomial(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            if len(value) % 32 != 0:
-                raise ValueError('result value length {} not divisible by 32 bytes'.format(len(value)))
-            polynomial = tuple(int.from_bytes(value[i:i+32], byteorder='big') for i in range(0, len(value), 32))
-            util.validate_polynomial(polynomial)
-            return polynomial
+            return util.bytes_to_polynomial(value)
 
 
 class CurvePointTuple(types.TypeDecorator):
@@ -119,9 +108,4 @@ class CurvePointTuple(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            if len(value) % 64 != 0:
-                raise ValueError('result value length {} not divisible by 64 bytes'.format(len(value)))
-            points = tuple(tuple(int.from_bytes(value[i+j:i+j+32], byteorder='big') for i in (0, 32)) for j in range(0, len(value), 64))
-            for point in points:
-                util.validate_curve_point(point)
-            return points
+            return util.bytes_to_curve_point_tuple(value)
