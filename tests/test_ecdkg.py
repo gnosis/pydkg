@@ -19,7 +19,7 @@ import pytest
 from pydkg import util
 
 
-BIN_NAME = 'gnodex'
+BIN_NAME = 'pydkg'
 PORTS_START = 59828
 
 NodeInfo = collections.namedtuple('NodeInfo', (
@@ -69,7 +69,7 @@ def nodes(num_ecdkg_nodes, request_timeout):
         processes = []
         for i in range(num_ecdkg_nodes):
             processes.append(exitstack.enter_context(Popen_with_interrupt_at_exit((
-                BIN_NAME, 'ecdkg',
+                BIN_NAME,
                 '--port', str(PORTS_START+i),
                 '--private-key-file', proc_dir_file('private.key.{}'.format(i)),
                 '--addresses-file', proc_dir_file('addresses.txt'),
@@ -150,7 +150,7 @@ def test_nodes_match_state(nodes, request_timeout):
     wait_for_all_nodes_listening(nodes, request_timeout)
 
     deccond = 'past {}'.format(datetime.utcnow().isoformat())
-    responses = [requests.post('https://localhost:{}'.format(n.port),
+    responses = [requests.post('http://localhost:{}'.format(n.port),
         verify=False,
         timeout=request_timeout,
         data=json.dumps({
@@ -166,7 +166,7 @@ def test_nodes_match_enckey_and_deckeys(nodes, request_timeout):
     wait_for_all_nodes_connected(nodes, request_timeout)
 
     deccond = 'past {}'.format(datetime.utcnow().isoformat())
-    enckeys = [requests.post('https://localhost:{}'.format(n.port),
+    enckeys = [requests.post('http://localhost:{}'.format(n.port),
         verify=False,
         timeout=request_timeout,
         data=json.dumps({
@@ -182,7 +182,7 @@ def test_nodes_match_enckey_and_deckeys(nodes, request_timeout):
 
     assert(all(ek == enckeys[0] for ek in enckeys[1:]))
 
-    deckeys = [requests.post('https://localhost:{}'.format(n.port),
+    deckeys = [requests.post('http://localhost:{}'.format(n.port),
         verify=False,
         timeout=request_timeout,
         data=json.dumps({
