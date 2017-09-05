@@ -24,8 +24,9 @@ except ImportError:
         import random
 
 
-def random_private_value() -> int:
-    return random.randrange(secp256k1.N)
+########################
+# Validation utilities #
+########################
 
 
 def validate_private_value(value: int):
@@ -60,6 +61,11 @@ def validate_signature(signature: 'rsv triplet'):
         raise ValueError('invalid signature {}'.format(signature))
 
 
+########################
+# Conversion utilities #
+########################
+
+
 def private_value_to_bytes(value: int) -> bytes:
     util.validate_private_value(value)
     return value.to_bytes(32, byteorder='big')
@@ -69,36 +75,6 @@ def bytes_to_private_value(bts: bytes) -> int:
     priv = int.from_bytes(bts, byteorder='big')
     util.validate_private_value(priv)
     return priv
-
-
-def normalize_decryption_condition(deccond: str, return_obj: bool = False):
-    prefix = 'past '
-    if deccond.startswith(prefix):
-        try:
-            dt = parse_datetime(deccond[len(prefix):])
-        except ValueError as e:
-            raise ValueError('could not parse date for "past" condition from string "{}"'.format(deccond[len(prefix):]))
-
-        # All time values internally UTC
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(tzutc())
-
-        # Strip out subsecond info and make naive
-        dt = dt.replace(microsecond=0, tzinfo=None)
-
-        if return_obj:
-            return (prefix, dt)
-
-        return prefix + dt.isoformat()
-
-    raise ValueError('invalid decryption condition {}'.format(deccond))
-
-
-async def decryption_condition_satisfied(deccond: str) -> bool:
-    prefix, obj = normalize_decryption_condition(deccond, True)
-    if prefix == 'past ':
-        while datetime.utcnow() < obj:
-            await asyncio.sleep(max(0, (obj - datetime.utcnow()).total_seconds()))
 
 
 def sequence_256_bit_values_to_bytes(sequence: tuple) -> bytes:
@@ -111,6 +87,11 @@ def private_value_to_eth_address(private_value: int) -> int:
 
 def curve_point_to_eth_address(curve_point: (int, int)) -> int:
     return int.from_bytes(sha3.keccak_256(sequence_256_bit_values_to_bytes(curve_point)).digest()[-20:], byteorder='big')
+
+
+###########################
+# Configuration utilities #
+###########################
 
 
 PRIVATE_VALUE_RE = re.compile(r'(?P<optprefix>0x)?(?P<value>[0-9A-Fa-f]{64})')
@@ -142,3 +123,42 @@ DEFAULT_PORT = 80
 def get_locations(filepath: str) -> list:
     with open(filepath, 'r') as f:
         return list((m.group('hostname'), int(m.group('port') or DEFAULT_PORT)) for m in filter(lambda v: v is not None, (LOCATION_RE.fullmatch(l.strip()) for l in f if not l.startswith('#'))))
+
+
+###################
+# Other utilities #
+###################
+
+
+def random_private_value() -> int:
+    return random.randrange(secp256k1.N)
+
+
+def normalize_decryption_condition(deccond: str, return_obj: bool = False):
+    prefix = 'past '
+    if deccond.startswith(prefix):
+        try:
+            dt = parse_datetime(deccond[len(prefix):])
+        except ValueError as e:
+            raise ValueError('could not parse date for "past" condition from string "{}"'.format(deccond[len(prefix):]))
+
+        # All time values internally UTC
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(tzutc())
+
+        # Strip out subsecond info and make naive
+        dt = dt.replace(microsecond=0, tzinfo=None)
+
+        if return_obj:
+            return (prefix, dt)
+
+        return prefix + dt.isoformat()
+
+    raise ValueError('invalid decryption condition {}'.format(deccond))
+
+
+async def decryption_condition_satisfied(deccond: str) -> bool:
+    prefix, obj = normalize_decryption_condition(deccond, True)
+    if prefix == 'past ':
+        while datetime.utcnow() < obj:
+            await asyncio.sleep(max(0, (obj - datetime.utcnow()).total_seconds()))
