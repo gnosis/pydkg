@@ -29,7 +29,7 @@ def encrypt(message: bytes, enckey: (int, int)) -> bytes:
     # hence does not need the HMAC nested construction. Instead, MAC computation
     # can be performed by simply prepending the message with the key.
     d = sha3.keccak_256(kM + c).digest()
-    return (b''.join(x.to_bytes(32, byteorder='big') for x in R) + # 64 byte ephemeral key
+    return (util.curve_point_to_bytes(R) + # 64 byte ephemeral key
             bytes((num_trunc_bytes,)) + # 1 byte truncation descriptor
             iv + # 32 byte initialization vector
             c + # arbitrary length 32 byte aligned enciphered message

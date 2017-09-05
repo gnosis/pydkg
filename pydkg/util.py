@@ -77,12 +77,22 @@ def bytes_to_private_value(bts: bytes) -> int:
     return priv
 
 
+def curve_point_to_bytes(point: (int, int)) -> bytes:
+    validate_curve_point(point)
+    return sequence_256_bit_values_to_bytes(point)
+
+
 def bytes_to_curve_point(bts: bytes) -> (int, int):
     if len(bts) != 64:
         raise ValueError('unexpected length {} bytes'.format(len(bts)))
     point = tuple(int.from_bytes(bts[i:i+32], byteorder='big') for i in (0, 32))
     validate_curve_point(point)
     return point
+
+
+def signature_to_bytes(signature: 'rsv triplet') -> bytes:
+    validate_signature(signature)
+    return b''.join(int.to_bytes(part, partsize, byteorder='big') for part, partsize in zip(signature, (32, 32, 1)))
 
 
 def bytes_to_signature(bts: bytes) -> 'rsv triplet':
@@ -93,6 +103,11 @@ def bytes_to_signature(bts: bytes) -> 'rsv triplet':
     return signature
 
 
+def address_to_bytes(addr: int) -> bytes:
+    validate_eth_address(addr)
+    return addr.to_bytes(20, byteorder='big')
+
+
 def bytes_to_address(bts: bytes) -> int:
     if len(bts) != 20:
         raise ValueError('unexpected length {} bytes'.format(len(bts)))
@@ -101,12 +116,21 @@ def bytes_to_address(bts: bytes) -> int:
     return addr
 
 
+def polynomial_to_bytes(polynomial: tuple) -> bytes:
+    validate_polynomial(polynomial)
+    return sequence_256_bit_values_to_bytes(polynomial)
+
+
 def bytes_to_polynomial(bts: bytes) -> tuple:
     if len(bts) % 32 != 0:
         raise ValueError('length {} not divisible by 32 bytes'.format(len(bts)))
     polynomial = tuple(int.from_bytes(bts[i:i+32], byteorder='big') for i in range(0, len(bts), 32))
     validate_polynomial(polynomial)
     return polynomial
+
+
+def curve_point_tuple_to_bytes(points: tuple) -> bytes:
+    return b''.join(curve_point_to_bytes(point) for point in points)
 
 
 def bytes_to_curve_point_tuple(bts: bytes) -> tuple:
@@ -124,7 +148,7 @@ def private_value_to_eth_address(private_value: int) -> int:
 
 
 def curve_point_to_eth_address(curve_point: (int, int)) -> int:
-    return int.from_bytes(sha3.keccak_256(sequence_256_bit_values_to_bytes(curve_point)).digest()[-20:], byteorder='big')
+    return int.from_bytes(sha3.keccak_256(curve_point_to_bytes(curve_point)).digest()[-20:], byteorder='big')
 
 
 ###########################

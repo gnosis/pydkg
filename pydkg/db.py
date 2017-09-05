@@ -46,12 +46,12 @@ class CurvePoint(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            util.validate_curve_point(value)
-            return util.sequence_256_bit_values_to_bytes(value)
+            return util.curve_point_to_bytes(value)
 
     def process_result_value(self, value, dialect):
         if value is not None:
             return util.bytes_to_curve_point(value)
+
 
 class Signature(types.TypeDecorator):
     impl = types.LargeBinary
@@ -59,12 +59,12 @@ class Signature(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            util.validate_signature(value)
-            return tuple(int.to_bytes(part, partsize, byteorder='big') for part, partsize in zip(value, (32, 32, 1)))
+            return util.signature_to_bytes(value)
 
     def process_result_value(self, value, dialect):
         if value is not None:
             return util.bytes_to_signature(value)
+
 
 class EthAddress(types.TypeDecorator):
     impl = types.LargeBinary
@@ -72,8 +72,7 @@ class EthAddress(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            util.validate_eth_address(value)
-            return value.to_bytes(20, byteorder='big')
+            return util.address_to_bytes(value)
 
     def process_result_value(self, value, dialect):
         if value is not None:
@@ -86,8 +85,7 @@ class Polynomial(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            util.validate_polynomial(value)
-            return util.sequence_256_bit_values_to_bytes(value)
+            return util.polynomial_to_bytes(value)
 
     def process_result_value(self, value, dialect):
         if value is not None:
@@ -100,11 +98,7 @@ class CurvePointTuple(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            def validated_convert(point):
-                util.validate_curve_point(point)
-                return util.sequence_256_bit_values_to_bytes(point)
-
-            return b''.join(validated_convert(point) for point in value)
+            return util.curve_point_tuple_to_bytes(value)
 
     def process_result_value(self, value, dialect):
         if value is not None:

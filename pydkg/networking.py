@@ -221,7 +221,7 @@ async def respond_to_nonce_with_signature(reader: asyncio.StreamReader,
 
     v, r, s = secp256k1.ecdsa_raw_sign(noncebytes, ecdkg.private_key.to_bytes(32, byteorder='big'))
     logging.debug('sending nonce signature rsv ({:064x}, {:064x}, {:02x})'.format(r, s, v))
-    writer.write(r.to_bytes(32, 'big') + s.to_bytes(32, 'big') + v.to_bytes(1, 'big'))
+    writer.write(util.signature_to_bytes((r, s, v)))
 
 
 ################################################################################
