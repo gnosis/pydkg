@@ -203,7 +203,7 @@ async def determine_address_via_nonce(reader: asyncio.StreamReader,
     logging.debug('received signature rsv ({:064x}, {:064x}, {:02x})'.format(*signature))
 
     try:
-        address = util.address_from_bytes_and_signature(noncebytes, signature)
+        address = util.address_from_message_and_signature(noncebytes, signature, hash=None)
     except ValueError as err:
         logging.debug('could not recover address: {}'.format(err))
         return None

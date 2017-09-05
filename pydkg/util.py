@@ -196,16 +196,21 @@ def random_private_value() -> int:
     return random.randrange(secp256k1.N)
 
 
-def address_from_bytes_and_signature(bts: bytes, signature: 'rsv triplet') -> int:
-    if len(bts) != 32:
-        raise ValueError('bytes must have length 32 but got {} ({})'.format(len(bts), bts))
+def address_from_message_and_signature(message: bytes, signature: 'rsv triplet', hash: 'hash class' = sha3.keccak_256) -> int:
+    if hash is None:
+        value = message
+    else:
+        value = hash(message).digest()
+
+    if len(value) != 32:
+        raise ValueError('value must have length 32 but got length {} ({})'.format(len(value), value))
 
     (r, s, v) = signature
 
-    pubkey = secp256k1.ecdsa_raw_recover(bts, (v, r, s))
+    pubkey = secp256k1.ecdsa_raw_recover(value, (v, r, s))
 
     if not pubkey:
-        raise ValueError('ECDSA public key recovery failed with bytes {} and signature {}'.format(bts, signature))
+        raise ValueError('ECDSA public key recovery failed with bytes {} and signature {}'.format(value, signature))
 
     return curve_point_to_eth_address(pubkey)
 
@@ -217,7 +222,7 @@ def sign_with_key(message: bytes, key: int, hash: 'hash class' = sha3.keccak_256
         value = hash(message).digest()
 
     if len(value) != 32:
-        raise ValueError('expected signature input to be 32 bytes but got length {}'.format(len(value)))
+        raise ValueError('value must have length 32 but got length {} ({})'.format(len(value), value))
 
     v, r, s = secp256k1.ecdsa_raw_sign(value, private_value_to_bytes(key))
     return (r, s, v)

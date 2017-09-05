@@ -116,12 +116,22 @@ class ECDKG(db.Base):
             address = participant.eth_address
 
             if address in signed_secret_shares:
-                (share1, share2), rsv = signed_secret_shares[address]
+                (share1, share2), signature = signed_secret_shares[address]
 
-                # TODO: Check signature is valid here
-
-                participant.secret_share1 = share1
-                participant.secret_share2 = share2
+                try:
+                    recovered_address = util.address_from_message_and_signature(
+                        util.private_value_to_bytes(share1) + util.private_value_to_bytes(share2),
+                        signature,
+                    )
+                    if address == recovered_address:
+                        participant.secret_share1 = share1
+                        participant.secret_share2 = share2
+                        participant.shares_signature = signature
+                    else:
+                        logging.warning('address of channel {:040x} does not match recovered address {:040x}'
+                            .format(address, recovered_address))
+                except ValueError as e:
+                    logging.warning('signature from address {:040x} could not be verified: {}'.format(address, e))
             else:
                 logging.warning('missing share from address {:040x}'.format(address))
 
@@ -275,6 +285,7 @@ class ECDKGParticipant(db.Base):
     verification_points = db.Column(db.CurvePointTuple)
     secret_share1 = db.Column(db.PrivateValue)
     secret_share2 = db.Column(db.PrivateValue)
+    shares_signature = db.Column(db.Signature)
 
     __table_args__ = (db.UniqueConstraint('ecdkg_id', 'eth_address'),)
 
