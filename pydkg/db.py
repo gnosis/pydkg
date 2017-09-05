@@ -69,12 +69,7 @@ class Signature(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            if len(value) != 65:
-                raise ValueError('unexpected result value length {} bytes'.format(len(value)))
-            signature = tuple(int.from_bytes(bs, byteorder='big') for bs in (value[0:32], value[32:64], value[64:]))
-            util.validate_signature(signature)
-            return signature
-
+            return util.bytes_to_signature(value)
 
 class EthAddress(types.TypeDecorator):
     impl = types.LargeBinary

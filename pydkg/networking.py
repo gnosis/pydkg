@@ -199,7 +199,7 @@ async def determine_address_via_nonce(reader: asyncio.StreamReader,
     writer.write(nonce.to_bytes(32, byteorder='big'))
 
     rsv_bytes = await asyncio.wait_for(reader.read(65), timeout)
-    signature = tuple(int.from_bytes(b, byteorder='big') for b in (rsv_bytes[0:32], rsv_bytes[32:64], rsv_bytes[64:]))
+    signature = util.bytes_to_signature(rsv_bytes)
     logging.debug('received signature rsv ({:064x}, {:064x}, {:02x})'.format(*signature))
 
     try:

@@ -77,6 +77,14 @@ def bytes_to_private_value(bts: bytes) -> int:
     return priv
 
 
+def bytes_to_signature(bts: bytes) -> 'rsv triplet':
+    if len(bts) != 65:
+        raise ValueError('unexpected length {} bytes'.format(len(bts)))
+    signature = tuple(int.from_bytes(bs, byteorder='big') for bs in (bts[0:32], bts[32:64], bts[64:]))
+    validate_signature(signature)
+    return signature
+
+
 def sequence_256_bit_values_to_bytes(sequence: tuple) -> bytes:
     return b''.join(map(functools.partial(int.to_bytes, length=32, byteorder='big'), sequence))
 
