@@ -60,6 +60,17 @@ def validate_signature(signature: 'rsv triplet'):
         raise ValueError('invalid signature {}'.format(signature))
 
 
+def private_value_to_bytes(value: int) -> bytes:
+    util.validate_private_value(value)
+    return value.to_bytes(32, byteorder='big')
+
+
+def bytes_to_private_value(bts: bytes) -> int:
+    priv = int.from_bytes(bts, byteorder='big')
+    util.validate_private_value(priv)
+    return priv
+
+
 def normalize_decryption_condition(deccond: str, return_obj: bool = False):
     prefix = 'past '
     if deccond.startswith(prefix):

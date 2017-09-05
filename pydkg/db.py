@@ -33,14 +33,11 @@ class PrivateValue(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            util.validate_private_value(value)
-            return value.to_bytes(32, byteorder='big')
+            return util.private_value_to_bytes(value)
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            priv = int.from_bytes(value, byteorder='big')
-            util.validate_private_value(priv)
-            return priv
+            return util.bytes_to_private_value(value)
 
 
 class CurvePoint(types.TypeDecorator):
