@@ -4,6 +4,7 @@ import functools
 import itertools
 import logging
 import math
+import sha3
 
 from py_ecc.secp256k1 import secp256k1
 
@@ -108,14 +109,17 @@ class ECDKG(db.Base):
 
 
     async def handle_key_distribution_phase(self):
-        secret_shares = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_secret_shares', self.decryption_condition)
+        signed_secret_shares = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_signed_secret_shares', self.decryption_condition)
 
         for participant in self.participants:
             address = participant.eth_address
 
             if address in secret_shares:
-                share1, share2 = (int(s, 16) for s in secret_shares[address])
+                (share1, share2), rsv = secret_shares[address]
+
+                # TODO: Check signature is valid here
+
                 participant.secret_share1 = share1
                 participant.secret_share2 = share2
             else:
@@ -160,7 +164,9 @@ class ECDKG(db.Base):
 
 
     async def handle_key_check_phase(self):
-        # TODO: Get complaints and filter qualifying set
+        complaints = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_complaints', self.decryption_condition)
+
         self.phase = ECDKGPhase.key_generation
         db.Session.commit()
 
@@ -222,9 +228,17 @@ class ECDKG(db.Base):
         return participant
 
 
-    def get_secret_shares(self, address: int) -> (int, int):
-        return (eval_polynomial(self.secret_poly1, address),
-                eval_polynomial(self.secret_poly2, address))
+    def get_signed_secret_shares(self, address: int) -> ((int, int), 'rsv triplet'):
+        global private_key
+
+        secret_shares = (eval_polynomial(self.secret_poly1, address),
+                         eval_polynomial(self.secret_poly2, address))
+
+        msg_hash = sha3.keccak_256(b''.join(util.private_value_to_bytes(s) for s in secret_shares)).digest()
+
+        signature = secp256k1.ecdsa_raw_sign(msg_hash, private_key)
+
+        return (secret_shares, signature)
 
 
     def to_state_message(self) -> dict:
@@ -261,6 +275,7 @@ class ECDKGParticipant(db.Base):
     verification_points = db.Column(db.CurvePointTuple)
     secret_share1 = db.Column(db.PrivateValue)
     secret_share2 = db.Column(db.PrivateValue)
+
     __table_args__ = (db.UniqueConstraint('ecdkg_id', 'eth_address'),)
 
 
@@ -273,3 +288,6 @@ class ECDKGParticipant(db.Base):
                 msg[attr] = '{0[0]:064x}{0[1]:064x}'.format(val)
 
         return msg
+
+
+class ECDKGComplaint(db.Base):
