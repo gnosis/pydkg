@@ -8,6 +8,7 @@ from py_ecc.secp256k1 import secp256k1
 
 from . import util, networking, ecdkg, db
 
+
 def main():
     parser = argparse.ArgumentParser(prog='pydkg', description='Distributedly generate some keys yo')
     parser.add_argument('--host', nargs='?', default='0.0.0.0',
@@ -26,7 +27,7 @@ def main():
                         help='File containing network locations to attempt connecting with (default: %(default)s)')
     args = parser.parse_args()
 
-
+    # args parsed; begin getting config stuff
     logging.basicConfig(level=args.log_level, format=args.log_format)
 
     ecdkg.private_key = util.get_or_generate_private_value(args.private_key_file)
@@ -36,7 +37,7 @@ def main():
     ecdkg.accepted_addresses.difference_update((ecdkg.own_address,))
     locations = util.get_locations(args.locations_file)
 
-
+    # display some info and initialize stuff
     logging.debug('own pubkey: ({0[0]:064x}, {0[1]:064x})'.format(own_public_key))
     logging.info('own address: {:040x}'.format(ecdkg.own_address))
     if ecdkg.accepted_addresses:
@@ -47,7 +48,7 @@ def main():
 
     db.init()
 
-
+    # setup shutdown handlers
     def shutdown(signum, frame):
         logging.info('\nShutting down...')
         sys.exit()
@@ -55,7 +56,7 @@ def main():
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, shutdown)
 
-
+    # main program loop
     loop = asyncio.get_event_loop()
     loop.run_until_complete(networking.server(args.host, args.port, loop=loop))
     for hostname, port in locations:
@@ -72,6 +73,7 @@ def main():
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
         logging.info('Goodbye')
+
 
 if __name__ == '__main__':
     main()

@@ -1,22 +1,11 @@
 import asyncio
 import collections
-import datetime
 import json
 import logging
-import os
-import ssl
-import tempfile
 import uuid
 
 from http.server import BaseHTTPRequestHandler
 
-from py_ecc.secp256k1 import secp256k1
-
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
 from jsonrpc import JSONRPCResponseManager
 
 from . import util, ecdkg, rpc_interface, db
@@ -35,6 +24,7 @@ class HTTPRequest(BaseHTTPRequestHandler):
         self.raw_requestline = raw_requestline
         self.stream_reader = stream_reader
         self.error_code = self.error_message = None
+
         def rfile_readline(_):
             gen = self.stream_reader.readline()
             try:
@@ -53,7 +43,12 @@ class HTTPRequest(BaseHTTPRequestHandler):
         return '<{module}.{classname}\n {desc}>'.format(
             module=__name__,
             classname=self.__class__.__name__,
-            desc='\n '.join('{}={}'.format(attr, ('\n  '+' '*len(attr)).join(filter(bool, str(getattr(self, attr, None)).split('\n')))) for attr in ('command', 'path', 'headers')))
+            desc='\n '.join(
+                '{}={}'.format(
+                    attr,
+                    ('\n  '+' '*len(attr)).join(filter(bool, str(getattr(self, attr, None)).split('\n'))))
+                for attr in ('command', 'path', 'headers')))
+
 
 channels = {}
 default_dispatcher = rpc_interface.create_dispatcher()
@@ -69,7 +64,10 @@ async def json_lines_with_timeout(reader: asyncio.StreamReader, timeout: 'second
             pass
 
 
-async def establish_channel(eth_address: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, location: (str, int) = None):
+async def establish_channel(eth_address: int,
+                            reader: asyncio.StreamReader,
+                            writer: asyncio.StreamWriter,
+                            location: (str, int) = None):
     if eth_address not in channels:
         channels[eth_address] = {}
 
@@ -127,9 +125,11 @@ def make_jsonrpc_call(cinfo: 'channel info',
     if loop is None:
         loop = asyncio.get_event_loop()
 
-    msg = { 'method': method_name,
-            'params': args,
-            'jsonrpc': '2.0' }
+    msg = {
+        'method': method_name,
+        'params': args,
+        'jsonrpc': '2.0',
+    }
 
     if 'writer' in cinfo:
         if not is_notification:
@@ -153,8 +153,7 @@ async def get_response_data(res: 'jsonrpc response', timeout: 'seconds' = DEFAUL
     if res is not None:
         res_data = res.data
         if 'result' in res_data:
-            if (asyncio.iscoroutine(res_data['result']) or
-                isinstance(res_data['result'], asyncio.Future)):
+            if (asyncio.iscoroutine(res_data['result']) or isinstance(res_data['result'], asyncio.Future)):
                 res_data['result'] = await asyncio.wait_for(res_data['result'], timeout)
         return res_data
 
@@ -293,7 +292,6 @@ async def server(host: str, port: int, *,
                                host, port, loop=loop)
 
 
-
 ################################################################################
 
 async def attempt_to_establish_channel(host: str, port: int, *,
@@ -305,7 +303,7 @@ async def attempt_to_establish_channel(host: str, port: int, *,
         try:
             reader, writer = await asyncio.open_connection(host, port)
         except OSError as e:
-            if e.errno == 111 or '[Errno 111]' in str(e): # connection refused
+            if e.errno == 111 or '[Errno 111]' in str(e):  # connection refused
                 if i < num_tries - 1:
                     wait_time = 5 * 2**i
                     logging.debug('(c) connection to {}:{} refused; trying again in {}s'.format(host, port, wait_time))

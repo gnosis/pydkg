@@ -1,15 +1,15 @@
-import asyncio
 import enum
 import functools
-import itertools
 import logging
 import math
-import sha3
 
 from py_ecc.secp256k1 import secp256k1
+from sqlalchemy import types
+from sqlalchemy.schema import Column, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import relationship
 
 from . import db, util, networking
-
+from .rpc_interface import ProtocolError
 
 COMS_TIMEOUT = 10
 THRESHOLD_FACTOR = .5
@@ -54,26 +54,27 @@ class ECDKGPhase(enum.IntEnum):
 class ECDKG(db.Base):
     __tablename__ = 'ecdkg'
 
-    decryption_condition = db.Column(db.String(32), index=True, unique=True)
-    phase = db.Column(db.Enum(ECDKGPhase), nullable=False, default=ECDKGPhase.uninitialized)
-    threshold = db.Column(db.Integer)
-    encryption_key = db.Column(db.CurvePoint)
-    decryption_key = db.Column(db.PrivateValue)
-    participants = db.relationship('ECDKGParticipant', back_populates='ecdkg')
+    decryption_condition = Column(types.String(32), index=True, unique=True)
+    phase = Column(types.Enum(ECDKGPhase), nullable=False, default=ECDKGPhase.uninitialized)
+    threshold = Column(types.Integer)
+    encryption_key = Column(db.CurvePoint)
+    decryption_key = Column(db.PrivateValue)
+    participants = relationship('ECDKGParticipant', back_populates='ecdkg')
 
-    secret_poly1 = db.Column(db.Polynomial)
-    secret_poly2 = db.Column(db.Polynomial)
-    verification_points = db.Column(db.CurvePointTuple)
-    encryption_key_part = db.Column(db.CurvePoint)
-
+    secret_poly1 = Column(db.Polynomial)
+    secret_poly2 = Column(db.Polynomial)
+    verification_points = Column(db.CurvePointTuple)
+    encryption_key_part = Column(db.CurvePoint)
 
     @classmethod
     def get_or_create_by_decryption_condition(cls, decryption_condition: str) -> 'ECDKG':
         decryption_condition = util.normalize_decryption_condition(decryption_condition)
-        ecdkg_obj = (db.Session
+        ecdkg_obj = (
+            db.Session
             .query(cls)
             .filter(cls.decryption_condition == decryption_condition)
-            .scalar())
+            .scalar()
+        )
 
         if ecdkg_obj is None:
             ecdkg_obj = cls(decryption_condition=decryption_condition)
@@ -82,12 +83,10 @@ class ECDKG(db.Base):
 
         return ecdkg_obj
 
-
     async def run_until_phase(self, target_phase: ECDKGPhase):
         while self.phase < target_phase:
             logging.info('handling {} phase...'.format(self.phase.name))
             await getattr(self, 'handle_{}_phase'.format(self.phase.name))()
-
 
     async def handle_uninitialized_phase(self):
         for addr in networking.channels.keys():
@@ -104,11 +103,13 @@ class ECDKG(db.Base):
 
         self.encryption_key_part = secp256k1.multiply(secp256k1.G, self.secret_poly1[0])
 
-        self.verification_points = tuple(secp256k1.add(secp256k1.multiply(secp256k1.G, a), secp256k1.multiply(G2, b)) for a, b in zip(spoly1, spoly2))
+        self.verification_points = tuple(
+            secp256k1.add(secp256k1.multiply(secp256k1.G, a), secp256k1.multiply(G2, b))
+            for a, b in zip(spoly1, spoly2)
+        )
 
         self.phase = ECDKGPhase.key_distribution
         db.Session.commit()
-
 
     async def handle_key_distribution_phase(self):
         global own_address
@@ -141,8 +142,10 @@ class ECDKG(db.Base):
                 continue
 
             if address != recovered_address:
-                logging.warning('address of channel {:040x} does not match recovered address {:040x}'
-                    .format(address, recovered_address))
+                logging.warning(
+                    'address of channel {:040x} does not match recovered address {:040x}'
+                    .format(address, recovered_address)
+                )
                 continue
 
             participant.secret_share1 = share1
@@ -156,13 +159,13 @@ class ECDKG(db.Base):
         for participant in self.participants:
             address = participant.eth_address
             if address in verification_points:
-                participant.verification_points = tuple(tuple(int(ptstr[i:i+64], 16) for i in (0, 64)) for ptstr in verification_points[address])
+                participant.verification_points = tuple(tuple(
+                    int(ptstr[i:i+64], 16) for i in (0, 64)) for ptstr in verification_points[address])
             else:
                 logging.warning('missing verification_points from address {:040x}'.format(address))
 
         self.phase = ECDKGPhase.key_verification
         db.Session.commit()
-
 
     async def handle_key_verification_phase(self):
         global own_address
@@ -174,16 +177,18 @@ class ECDKG(db.Base):
             if share1 is not None and share2 is not None:
                 vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
                                      secp256k1.multiply(G2, share2))
-                vrhs = functools.reduce(secp256k1.add, (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N)) for k, ps in enumerate(participant.verification_points)))
+                vrhs = functools.reduce(
+                    secp256k1.add,
+                    (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N))
+                        for k, ps in enumerate(participant.verification_points)))
 
                 if vlhs == vrhs:
                     continue
 
-            complaint = participant.get_or_create_complaint_by_complainer_address(own_address)
+            participant.get_or_create_complaint_by_complainer_address(own_address)
 
         self.phase = ECDKGPhase.key_check
         db.Session.commit()
-
 
     async def handle_key_check_phase(self):
         complaints = await networking.broadcast_jsonrpc_call_on_all_channels(
@@ -199,7 +204,6 @@ class ECDKG(db.Base):
         self.phase = ECDKGPhase.key_generation
         db.Session.commit()
 
-
     async def handle_key_generation_phase(self):
         encryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
             'get_encryption_key_part', self.decryption_condition)
@@ -213,12 +217,14 @@ class ECDKG(db.Base):
                 # TODO: this is supposed to be broadcast... maybe try getting it from other nodes instead?
                 raise ProtocolError('missing encryption_key_part from address {:040x}'.format(address))
 
-        self.encryption_key = functools.reduce(secp256k1.add,
-            (p.encryption_key_part for p in self.participants), self.encryption_key_part)
+        self.encryption_key = functools.reduce(
+            secp256k1.add,
+            (p.encryption_key_part for p in self.participants),
+            self.encryption_key_part
+        )
 
         self.phase = ECDKGPhase.key_publication
         db.Session.commit()
-
 
     async def handle_key_publication_phase(self):
         await util.decryption_condition_satisfied(self.decryption_condition)
@@ -234,28 +240,29 @@ class ECDKG(db.Base):
                 # TODO: switch to interpolation of secret shares if waiting doesn't work
                 raise ProtocolError('missing decryption key part!')
 
-        self.decryption_key = (sum(p.decryption_key_part for p in self.participants) + self.secret_poly1[0]) % secp256k1.N
+        self.decryption_key = (
+            sum(p.decryption_key_part for p in self.participants) +
+            self.secret_poly1[0]
+        ) % secp256k1.N
 
         self.phase = ECDKGPhase.complete
         db.Session.commit()
 
-
     def get_or_create_participant_by_address(self, address: int) -> 'ECDKGParticipant':
-        participant = (db.Session
+        participant = (
+            db.Session
             .query(ECDKGParticipant)
             .filter(ECDKGParticipant.ecdkg_id == self.id,
                     ECDKGParticipant.eth_address == address)
-            .scalar())
+            .scalar()
+        )
 
         if participant is None:
             participant = ECDKGParticipant(ecdkg_id=self.id, eth_address=address)
             db.Session.add(participant)
             db.Session.commit()
 
-        sfid = (self.id, address)
-
         return participant
-
 
     def get_signed_secret_shares(self, address: int) -> ((int, int), 'rsv triplet'):
         global private_key
@@ -275,15 +282,14 @@ class ECDKG(db.Base):
 
         return (secret_shares, signature)
 
-
     def get_complaints_by(self, address: int) -> dict:
-        return (db.Session
+        return (
+            db.Session
             .query(ECDKGComplaint)
-            .filter(#ECDKGComplaint.participant.ecdkg_id == self.id,
+            .filter(  # ECDKGComplaint.participant.ecdkg_id == self.id,
                     ECDKGComplaint.complainer_address == address)
-            .all())
-
-
+            .all()
+        )
 
     def to_state_message(self) -> dict:
         global own_address
@@ -312,38 +318,36 @@ class ECDKG(db.Base):
 class ECDKGParticipant(db.Base):
     __tablename__ = 'ecdkg_participant'
 
-    ecdkg_id = db.Column(db.Integer, db.ForeignKey('ecdkg.id'))
-    ecdkg = db.relationship('ECDKG', back_populates='participants')
-    eth_address = db.Column(db.EthAddress, index=True)
+    ecdkg_id = Column(types.Integer, ForeignKey('ecdkg.id'))
+    ecdkg = relationship('ECDKG', back_populates='participants')
+    eth_address = Column(db.EthAddress, index=True)
 
-    encryption_key_part = db.Column(db.CurvePoint)
-    decryption_key_part = db.Column(db.PrivateValue)
-    verification_points = db.Column(db.CurvePointTuple)
-    secret_share1 = db.Column(db.PrivateValue)
-    secret_share2 = db.Column(db.PrivateValue)
-    shares_signature = db.Column(db.Signature)
+    encryption_key_part = Column(db.CurvePoint)
+    decryption_key_part = Column(db.PrivateValue)
+    verification_points = Column(db.CurvePointTuple)
+    secret_share1 = Column(db.PrivateValue)
+    secret_share2 = Column(db.PrivateValue)
+    shares_signature = Column(db.Signature)
 
-    complaints = db.relationship('ECDKGComplaint', back_populates='participant')
+    complaints = relationship('ECDKGComplaint', back_populates='participant')
 
-    __table_args__ = (db.UniqueConstraint('ecdkg_id', 'eth_address'),)
-
+    __table_args__ = (UniqueConstraint('ecdkg_id', 'eth_address'),)
 
     def get_or_create_complaint_by_complainer_address(self, address: int) -> 'ECDKGComplaint':
-        complaint = (db.Session
+        complaint = (
+            db.Session
             .query(ECDKGComplaint)
             .filter(ECDKGComplaint.participant_id == self.id,
                     ECDKGComplaint.complainer_address == address)
-            .scalar())
+            .scalar()
+        )
 
-        if participant is None:
-            participant = ECDKGParticipant(ecdkg_id=self.id, eth_address=address)
-            db.Session.add(participant)
+        if complaint is None:
+            complaint = ECDKGComplaint(participant_id=self.id, complainer_address=address)
+            db.Session.add(complaint)
             db.Session.commit()
 
-        sfid = (self.id, address)
-
-        return participant
-
+        return complaint
 
     def to_state_message(self, address: int = None) -> dict:
         msg = {}
@@ -359,8 +363,8 @@ class ECDKGParticipant(db.Base):
 class ECDKGComplaint(db.Base):
     __tablename__ = 'ecdkg_complaint'
 
-    participant_id = db.Column(db.Integer, db.ForeignKey('ecdkg_participant.id'))
-    participant = db.relationship('ECDKGParticipant', back_populates='complaints')
-    complainer_address = db.Column(db.EthAddress, index=True)
+    participant_id = Column(types.Integer, ForeignKey('ecdkg_participant.id'))
+    participant = relationship('ECDKGParticipant', back_populates='complaints')
+    complainer_address = Column(db.EthAddress, index=True)
 
-    __table_args__ = (db.UniqueConstraint('participant_id', 'complainer_address'),)
+    __table_args__ = (UniqueConstraint('participant_id', 'complainer_address'),)

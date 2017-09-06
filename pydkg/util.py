@@ -43,9 +43,10 @@ def validate_polynomial(polynomial: int):
 
 
 def validate_curve_point(point: (int, int)):
-    if (any(coord < 0 or coord >= secp256k1.P for coord in point) or
+    if (
+        any(coord < 0 or coord >= secp256k1.P for coord in point) or
         pow(point[1], 2, secp256k1.P) != (pow(point[0], 3, secp256k1.P) + 7) % secp256k1.P
-       ) and point != (0, 0): # (0, 0) is used to represent group identity element
+    ) and point != (0, 0):  # (0, 0) is used to represent group identity element
         raise ValueError('invalid EC point {}'.format(point))
 
 
@@ -155,8 +156,12 @@ def curve_point_to_eth_address(curve_point: (int, int)) -> int:
 # Configuration utilities #
 ###########################
 
-
 PRIVATE_VALUE_RE = re.compile(r'(?P<optprefix>0x)?(?P<value>[0-9A-Fa-f]{64})')
+ADDRESS_RE = re.compile(r'(?P<optprefix>0x)?(?P<value>[0-9A-Fa-f]{40})')
+LOCATION_RE = re.compile(r'(?P<hostname>[^:]*)(?::(?P<port>\d+))?')
+DEFAULT_PORT = 80
+
+
 def get_or_generate_private_value(filepath: str) -> int:
     if os.path.isfile(filepath):
         with open(filepath) as private_key_fp:
@@ -174,17 +179,23 @@ def get_or_generate_private_value(filepath: str) -> int:
         return private_key
 
 
-ADDRESS_RE = re.compile(r'(?P<optprefix>0x)?(?P<value>[0-9A-Fa-f]{40})')
 def get_addresses(filepath: str) -> set:
     with open(filepath, 'r') as f:
-        return set(int(m.group('value'), 16) for m in filter(lambda v: v is not None, (ADDRESS_RE.fullmatch(l.strip()) for l in f)))
+        return set(
+            int(m.group('value'), 16)
+            for m in filter(lambda v: v is not None, (ADDRESS_RE.fullmatch(l.strip()) for l in f))
+        )
 
 
-LOCATION_RE = re.compile(r'(?P<hostname>[^:]*)(?::(?P<port>\d+))?')
-DEFAULT_PORT = 80
 def get_locations(filepath: str) -> list:
     with open(filepath, 'r') as f:
-        return list((m.group('hostname'), int(m.group('port') or DEFAULT_PORT)) for m in filter(lambda v: v is not None, (LOCATION_RE.fullmatch(l.strip()) for l in f if not l.startswith('#'))))
+        return list(
+            (m.group('hostname'), int(m.group('port') or DEFAULT_PORT))
+            for m in filter(
+                lambda v: v is not None,
+                (LOCATION_RE.fullmatch(l.strip()) for l in f if not l.startswith('#'))
+            )
+        )
 
 
 ###################
@@ -196,7 +207,9 @@ def random_private_value() -> int:
     return random.randrange(secp256k1.N)
 
 
-def address_from_message_and_signature(message: bytes, signature: 'rsv triplet', hash: 'hash class' = sha3.keccak_256) -> int:
+def address_from_message_and_signature(message: bytes,
+                                       signature: 'rsv triplet',
+                                       hash: 'hash class' = sha3.keccak_256) -> int:
     if hash is None:
         value = message
     else:

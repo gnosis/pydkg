@@ -38,6 +38,7 @@ setup(
     ],
     extras_require={
         'test': [
+            'flake8',
             'populus',
             'psutil',
             'pytest',
