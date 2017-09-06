@@ -109,31 +109,42 @@ class ECDKG(db.Base):
 
 
     async def handle_key_distribution_phase(self):
+        global own_address
+
         signed_secret_shares = await networking.broadcast_jsonrpc_call_on_all_channels(
             'get_signed_secret_shares', self.decryption_condition)
 
         for participant in self.participants:
             address = participant.eth_address
 
-            if address in signed_secret_shares:
-                (share1, share2), signature = signed_secret_shares[address]
-
-                try:
-                    recovered_address = util.address_from_message_and_signature(
-                        util.private_value_to_bytes(share1) + util.private_value_to_bytes(share2),
-                        signature,
-                    )
-                    if address == recovered_address:
-                        participant.secret_share1 = share1
-                        participant.secret_share2 = share2
-                        participant.shares_signature = signature
-                    else:
-                        logging.warning('address of channel {:040x} does not match recovered address {:040x}'
-                            .format(address, recovered_address))
-                except ValueError as e:
-                    logging.warning('signature from address {:040x} could not be verified: {}'.format(address, e))
-            else:
+            if address not in signed_secret_shares:
                 logging.warning('missing share from address {:040x}'.format(address))
+                continue
+
+            (share1, share2), signature = signed_secret_shares[address]
+
+            try:
+                msg_bytes = (
+                    self.decryption_condition.encode() +
+                    util.address_to_bytes(own_address) +
+                    util.private_value_to_bytes(share1) +
+                    util.private_value_to_bytes(share2)
+                )
+
+                recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
+
+            except ValueError as e:
+                logging.warning('signature from address {:040x} could not be verified: {}'.format(address, e))
+                continue
+
+            if address != recovered_address:
+                logging.warning('address of channel {:040x} does not match recovered address {:040x}'
+                    .format(address, recovered_address))
+                continue
+
+            participant.secret_share1 = share1
+            participant.secret_share2 = share2
+            participant.shares_signature = signature
 
         logging.info('set all secret shares')
         verification_points = await networking.broadcast_jsonrpc_call_on_all_channels(
@@ -244,7 +255,12 @@ class ECDKG(db.Base):
         secret_shares = (eval_polynomial(self.secret_poly1, address),
                          eval_polynomial(self.secret_poly2, address))
 
-        msg_bytes = b''.join(util.private_value_to_bytes(s) for s in secret_shares)
+        msg_bytes = (
+            self.decryption_condition.encode() +
+            util.address_to_bytes(address) +
+            util.private_value_to_bytes(secret_shares[0]) +
+            util.private_value_to_bytes(secret_shares[1])
+        )
 
         signature = util.sign_with_key(msg_bytes, private_key)
 
