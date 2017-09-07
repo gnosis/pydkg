@@ -9,7 +9,6 @@ from sqlalchemy.schema import Column, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from . import db, util, networking
-from .rpc_interface import ProtocolError
 
 COMS_TIMEOUT = 10
 THRESHOLD_FACTOR = .5
@@ -79,16 +78,12 @@ class ECDKG(db.Base):
         if ecdkg_obj is None:
             ecdkg_obj = cls(decryption_condition=decryption_condition)
             db.Session.add(ecdkg_obj)
+            ecdkg_obj.init()
             db.Session.commit()
 
         return ecdkg_obj
 
-    async def run_until_phase(self, target_phase: ECDKGPhase):
-        while self.phase < target_phase:
-            logging.info('handling {} phase...'.format(self.phase.name))
-            await getattr(self, 'handle_{}_phase'.format(self.phase.name))()
-
-    async def handle_uninitialized_phase(self):
+    def init(self):
         for addr in networking.channels.keys():
             self.get_or_create_participant_by_address(addr)
 
@@ -109,11 +104,114 @@ class ECDKG(db.Base):
         )
 
         self.phase = ECDKGPhase.key_distribution
+
+    def process_advance_to_phase(self, target_phase: ECDKGPhase):
+        if self.phase < target_phase:
+            self.phase = target_phase
+            db.Session.commit()
+
+    def process_secret_shares(self, sender_address: int, secret_shares: (int, int), signature: 'rsv triplet'):
+        global own_address
+        participant = self.get_participant_by_address(sender_address)
+        share1, share2 = secret_shares
+
+        msg_bytes = (
+            self.decryption_condition.encode() +
+            util.address_to_bytes(own_address) +
+            b'SECRETSHARES' +
+            util.private_value_to_bytes(share1) +
+            util.private_value_to_bytes(share2)
+        )
+
+        recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
+
+        if sender_address != recovered_address:
+            raise ValueError(
+                'sender address {:040x} does not match recovered address {:040x}'
+                .format(sender_address, recovered_address)
+            )
+
+        # TODO: Check that existing shares match?
+
+        participant.secret_share1 = share1
+        participant.secret_share2 = share2
+        participant.shares_signature = signature
+
         db.Session.commit()
 
-    async def handle_key_distribution_phase(self):
-        global own_address
+    def process_verification_points(self, sender_address: int, verification_points: tuple, signature: 'rsv triplet'):
+        participant = self.get_participant_by_address(sender_address)
 
+        # TODO: Check and store v-point signature and check for existing match(?)
+
+        participant.verification_points = verification_points
+
+        db.Session.commit()
+
+    def process_secret_share_verification(self, address: int):
+        global own_address
+        participant = self.get_participant_by_address(address)
+
+        share1 = participant.secret_share1
+        share2 = participant.secret_share2
+
+        # TODO: Determine whether this check is necessary
+        if share1 is not None and share2 is not None:
+            vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
+                                 secp256k1.multiply(G2, share2))
+            vrhs = functools.reduce(
+                secp256k1.add,
+                (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N))
+                    for k, ps in enumerate(participant.verification_points)))
+
+            if vlhs == vrhs:
+                return
+
+        participant.get_or_create_complaint_by_complainer_address(own_address)
+
+    def process_encryption_key_part(self,
+                                    sender_address: int,
+                                    encryption_key_part: (int, int),
+                                    signature: 'rsv triplet'):
+        participant = self.get_participant_by_address(sender_address)
+
+        # TODO: Check and store enc key part signature and check for existing match(?)
+
+        participant.encryption_key_part = encryption_key_part
+
+        if all(p.encryption_key_part is not None for p in self.participants):
+            self.encryption_key = functools.reduce(
+                secp256k1.add,
+                (p.encryption_key_part for p in self.participants),
+                self.encryption_key_part
+            )
+
+        db.Session.commit()
+
+    def process_decryption_key_part(self,
+                                    sender_address: int,
+                                    decryption_key_part: int,
+                                    signature: 'rsv triplet'):
+        participant = self.get_participant_by_address(sender_address)
+
+        # TODO: Check and store dec key part signature and check for existing match(?)
+
+        participant.decryption_key_part = decryption_key_part
+
+        if all(p.decryption_key_part is not None for p in self.participants):
+            self.decryption_key = (
+                sum(p.decryption_key_part for p in self.participants) +
+                self.secret_poly1[0]
+            ) % secp256k1.N
+
+        db.Session.commit()
+
+    async def run_until_phase(self, target_phase: ECDKGPhase):
+        while self.phase < target_phase:
+            logging.info('handling {} phase...'.format(self.phase.name))
+            await getattr(self, 'handle_{}_phase'.format(self.phase.name))()
+
+    async def handle_key_distribution_phase(self):
         signed_secret_shares = await networking.broadcast_jsonrpc_call_on_all_channels(
             'get_signed_secret_shares', self.decryption_condition)
 
@@ -121,36 +219,16 @@ class ECDKG(db.Base):
             address = participant.eth_address
 
             if address not in signed_secret_shares:
-                logging.warning('missing share from address {:040x}'.format(address))
+                logging.warning('missing shares from address {:040x}'.format(address))
                 continue
-
-            (share1, share2), signature = signed_secret_shares[address]
 
             try:
-                msg_bytes = (
-                    self.decryption_condition.encode() +
-                    util.address_to_bytes(own_address) +
-                    b'SECRETSHARES' +
-                    util.private_value_to_bytes(share1) +
-                    util.private_value_to_bytes(share2)
-                )
-
-                recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
-
-            except ValueError as e:
-                logging.warning('signature from address {:040x} could not be verified: {}'.format(address, e))
-                continue
-
-            if address != recovered_address:
+                self.process_secret_shares(address, *signed_secret_shares[address])
+            except Exception as e:
                 logging.warning(
-                    'address of channel {:040x} does not match recovered address {:040x}'
-                    .format(address, recovered_address)
+                    'exception occurred while processing secret shares from {:040x}: {}'
+                    .format(address, e)
                 )
-                continue
-
-            participant.secret_share1 = share1
-            participant.secret_share2 = share2
-            participant.shares_signature = signature
 
         logging.info('set all secret shares')
         verification_points = await networking.broadcast_jsonrpc_call_on_all_channels(
@@ -158,37 +236,32 @@ class ECDKG(db.Base):
 
         for participant in self.participants:
             address = participant.eth_address
-            if address in verification_points:
-                participant.verification_points = tuple(tuple(
-                    int(ptstr[i:i+64], 16) for i in (0, 64)) for ptstr in verification_points[address])
-            else:
-                logging.warning('missing verification_points from address {:040x}'.format(address))
 
-        self.phase = ECDKGPhase.key_verification
-        db.Session.commit()
+            if address not in verification_points:
+                logging.warning('missing verification points from address {:040x}'.format(address))
+                continue
+
+            try:
+                self.process_verification_points(address, verification_points[address], None)
+            except Exception as e:
+                logging.warning(
+                    'exception occurred while processing verification points from {:040x}: {}'
+                    .format(address, e)
+                )
+
+        self.process_advance_to_phase(ECDKGPhase.key_verification)
 
     async def handle_key_verification_phase(self):
-        global own_address
-
         for participant in self.participants:
-            share1 = participant.secret_share1
-            share2 = participant.secret_share2
+            try:
+                self.process_secret_share_verification(participant.eth_address)
+            except Exception as e:
+                logging.warning(
+                    'exception occurred while verifying shares from {:040x}: {}'
+                    .format(participant.eth_address, e)
+                )
 
-            if share1 is not None and share2 is not None:
-                vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
-                                     secp256k1.multiply(G2, share2))
-                vrhs = functools.reduce(
-                    secp256k1.add,
-                    (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N))
-                        for k, ps in enumerate(participant.verification_points)))
-
-                if vlhs == vrhs:
-                    continue
-
-            participant.get_or_create_complaint_by_complainer_address(own_address)
-
-        self.phase = ECDKGPhase.key_check
-        db.Session.commit()
+        self.process_advance_to_phase(ECDKGPhase.key_check)
 
     async def handle_key_check_phase(self):
         complaints = await networking.broadcast_jsonrpc_call_on_all_channels(
@@ -197,12 +270,13 @@ class ECDKG(db.Base):
         for participant in self.participants:
             complainer_address = participant.eth_address
 
-            if complainer_address in complaints:
-                # TODO: Add complaints and collect responses to complaints
-                pass
+            if complainer_address not in complaints:
+                logging.warning('missing complaints from address {:040x}'.format(complainer_address))
+                continue
 
-        self.phase = ECDKGPhase.key_generation
-        db.Session.commit()
+            # TODO: Add complaints and collect responses to complaints
+
+        self.process_advance_to_phase(ECDKGPhase.key_generation)
 
     async def handle_key_generation_phase(self):
         encryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
@@ -210,45 +284,47 @@ class ECDKG(db.Base):
 
         for participant in self.participants:
             address = participant.eth_address
-            if address in encryption_key_parts:
-                ekp = tuple(int(encryption_key_parts[address][i:i+64], 16) for i in (0, 64))
-                participant.encryption_key_part = ekp
-            else:
+
+            if address not in encryption_key_parts:
                 # TODO: this is supposed to be broadcast... maybe try getting it from other nodes instead?
-                raise ProtocolError('missing encryption_key_part from address {:040x}'.format(address))
+                logging.warning('missing encryption key part from address {:040x}'.format(address))
+                continue
 
-        self.encryption_key = functools.reduce(
-            secp256k1.add,
-            (p.encryption_key_part for p in self.participants),
-            self.encryption_key_part
-        )
+            try:
+                self.process_encryption_key_part(address, encryption_key_parts[address], None)
+            except Exception as e:
+                logging.warning(
+                    'exception occurred while processing encryption key part from {:040x}: {}'
+                    .format(address, e)
+                )
 
-        self.phase = ECDKGPhase.key_publication
-        db.Session.commit()
+        self.process_advance_to_phase(ECDKGPhase.key_publication)
 
     async def handle_key_publication_phase(self):
         await util.decryption_condition_satisfied(self.decryption_condition)
 
-        dec_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
+        decryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
             'get_decryption_key_part', self.decryption_condition)
 
         for p in self.participants:
             address = p.eth_address
-            if address in dec_key_parts:
-                p.decryption_key_part = int(dec_key_parts[address], 16)
-            else:
+
+            if address not in decryption_key_parts:
                 # TODO: switch to interpolation of secret shares if waiting doesn't work
-                raise ProtocolError('missing decryption key part!')
+                logging.warning('missing decryption key part from address {:040x}'.format(address))
+                continue
 
-        self.decryption_key = (
-            sum(p.decryption_key_part for p in self.participants) +
-            self.secret_poly1[0]
-        ) % secp256k1.N
+            try:
+                self.process_decryption_key_part(address, decryption_key_parts[address], None)
+            except Exception as e:
+                logging.warning(
+                    'exception occurred while processing decryption key part from {:040x}: {}'
+                    .format(address, e)
+                )
 
-        self.phase = ECDKGPhase.complete
-        db.Session.commit()
+        self.process_advance_to_phase(ECDKGPhase.complete)
 
-    def get_or_create_participant_by_address(self, address: int) -> 'ECDKGParticipant':
+    def get_participant_by_address(self, address: int) -> 'ECDKGParticipant':
         participant = (
             db.Session
             .query(ECDKGParticipant)
@@ -258,11 +334,18 @@ class ECDKG(db.Base):
         )
 
         if participant is None:
+            raise ValueError('could not find participant with address {:040x}'.format(address))
+
+        return participant
+
+    def get_or_create_participant_by_address(self, address: int) -> 'ECDKGParticipant':
+        try:
+            return self.get_participant_by_address(address)
+        except ValueError:
             participant = ECDKGParticipant(ecdkg_id=self.id, eth_address=address)
             db.Session.add(participant)
             db.Session.commit()
-
-        return participant
+            return participant
 
     def get_signed_secret_shares(self, address: int) -> ((int, int), 'rsv triplet'):
         global private_key
