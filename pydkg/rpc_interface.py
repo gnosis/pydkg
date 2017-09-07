@@ -51,11 +51,11 @@ def create_dispatcher(address: int = None):
         return '{:064x}'.format(ecdkg_obj.decryption_key)
 
     @dispatcher_add_async_method
-    async def get_verification_points(decryption_condition):
+    async def get_signed_verification_points(decryption_condition):
         logging.info('sending vpoints to {:040x}'.format(address))
         ecdkg_obj = ecdkg.ECDKG.get_or_create_by_decryption_condition(decryption_condition)
         await ecdkg_obj.run_until_phase(ecdkg.ECDKGPhase.key_distribution)
-        return ecdkg_obj.verification_points
+        return ecdkg_obj.get_signed_verification_points()
 
     @dispatcher_add_async_method
     async def get_encryption_key_part(decryption_condition):

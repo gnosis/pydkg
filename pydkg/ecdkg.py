@@ -116,9 +116,9 @@ class ECDKG(db.Base):
         share1, share2 = secret_shares
 
         msg_bytes = (
+            b'SECRETSHARES' +
             self.decryption_condition.encode() +
             util.address_to_bytes(own_address) +
-            b'SECRETSHARES' +
             util.private_value_to_bytes(share1) +
             util.private_value_to_bytes(share2)
         )
@@ -131,22 +131,58 @@ class ECDKG(db.Base):
                 .format(sender_address, recovered_address)
             )
 
-        # TODO: Check that existing shares match?
+        if participant.secret_share1 is None and participant.secret_share2 is None:
+            participant.secret_share1 = share1
+            participant.secret_share2 = share2
+            participant.shares_signature = signature
 
-        participant.secret_share1 = share1
-        participant.secret_share2 = share2
-        participant.shares_signature = signature
-
-        db.Session.commit()
+            db.Session.commit()
+        elif participant.secret_share1 != share1 or participant.secret_share2 != share2:
+            participant.get_or_create_complaint_by_complainer_address(own_address)
+            raise ValueError(
+                '{:040x} sent shares for {} which do not match: {} != {}'
+                .format(
+                    sender_address,
+                    self.decryption_condition,
+                    (participant.secret_share1, participant.secret_share2),
+                    (share1, share2),
+                )
+            )
 
     def process_verification_points(self, sender_address: int, verification_points: tuple, signature: 'rsv triplet'):
+        global own_address
         participant = self.get_participant_by_address(sender_address)
 
-        # TODO: Check and store v-point signature and check for existing match(?)
+        msg_bytes = (
+            b'VERIFICATIONPOINTS' +
+            self.decryption_condition.encode() +
+            util.curve_point_tuple_to_bytes(verification_points)
+        )
 
-        participant.verification_points = verification_points
+        recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
 
-        db.Session.commit()
+        if sender_address != recovered_address:
+            raise ValueError(
+                'sender address {:040x} does not match recovered address {:040x}'
+                .format(sender_address, recovered_address)
+            )
+
+        if participant.verification_points is None:
+            participant.verification_points = verification_points
+            participant.verification_points_signature = signature
+
+            db.Session.commit()
+        elif participant.verification_points != verification_points:
+            participant.get_or_create_complaint_by_complainer_address(own_address)
+            raise ValueError(
+                '{:040x} sent verification points for {} which do not match: {} != {}'
+                .format(
+                    sender_address,
+                    self.decryption_condition,
+                    participant.verification_points,
+                    verification_points,
+                )
+            )
 
     def process_secret_share_verification(self, address: int):
         global own_address
@@ -231,18 +267,18 @@ class ECDKG(db.Base):
                 )
 
         logging.info('set all secret shares')
-        verification_points = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_verification_points', self.decryption_condition)
+        signed_verification_points = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_signed_verification_points', self.decryption_condition)
 
         for participant in self.participants:
             address = participant.eth_address
 
-            if address not in verification_points:
+            if address not in signed_verification_points:
                 logging.warning('missing verification points from address {:040x}'.format(address))
                 continue
 
             try:
-                self.process_verification_points(address, verification_points[address], None)
+                self.process_verification_points(address, *signed_verification_points[address])
             except Exception as e:
                 logging.warning(
                     'exception occurred while processing verification points from {:040x}: {}'
@@ -354,9 +390,9 @@ class ECDKG(db.Base):
                          eval_polynomial(self.secret_poly2, address))
 
         msg_bytes = (
+            b'SECRETSHARES' +
             self.decryption_condition.encode() +
             util.address_to_bytes(address) +
-            b'SECRETSHARES' +
             util.private_value_to_bytes(secret_shares[0]) +
             util.private_value_to_bytes(secret_shares[1])
         )
@@ -364,6 +400,19 @@ class ECDKG(db.Base):
         signature = util.sign_with_key(msg_bytes, private_key)
 
         return (secret_shares, signature)
+
+    def get_signed_verification_points(self) -> (tuple, 'rsv triplet'):
+        global private_key
+
+        msg_bytes = (
+            b'VERIFICATIONPOINTS' +
+            self.decryption_condition.encode() +
+            util.curve_point_tuple_to_bytes(self.verification_points)
+        )
+
+        signature = util.sign_with_key(msg_bytes, private_key)
+
+        return (self.verification_points, signature)
 
     def get_complaints_by(self, address: int) -> dict:
         return (
@@ -407,7 +456,10 @@ class ECDKGParticipant(db.Base):
 
     encryption_key_part = Column(db.CurvePoint)
     decryption_key_part = Column(db.PrivateValue)
+
     verification_points = Column(db.CurvePointTuple)
+    verification_points_signature = Column(db.Signature)
+
     secret_share1 = Column(db.PrivateValue)
     secret_share2 = Column(db.PrivateValue)
     shares_signature = Column(db.Signature)
