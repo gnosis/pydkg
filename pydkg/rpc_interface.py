@@ -37,12 +37,12 @@ def create_dispatcher(address: int = None):
         return '{0[0]:064x}{0[1]:064x}'.format(ecdkg_obj.encryption_key)
 
     @dispatcher_add_async_method
-    async def get_decryption_key_part(decryption_condition):
+    async def get_signed_decryption_key_part(decryption_condition):
         # TODO: Is running the get enc key even necessary now?
         await get_encryption_key(decryption_condition)
         await util.decryption_condition_satisfied(decryption_condition)
         ecdkg_obj = ecdkg.ECDKG.get_or_create_by_decryption_condition(decryption_condition)
-        return ecdkg_obj.secret_poly1[0]
+        return ecdkg_obj.get_signed_decryption_key_part()
 
     @dispatcher_add_async_method
     async def get_decryption_key(decryption_condition):
@@ -58,11 +58,11 @@ def create_dispatcher(address: int = None):
         return ecdkg_obj.get_signed_verification_points()
 
     @dispatcher_add_async_method
-    async def get_encryption_key_part(decryption_condition):
+    async def get_signed_encryption_key_part(decryption_condition):
         ecdkg_obj = ecdkg.ECDKG.get_or_create_by_decryption_condition(decryption_condition)
         # await ecdkg_obj.run_until_phase(ecdkg.ECDKGPhase.key_generation)
         await ecdkg_obj.run_until_phase(ecdkg.ECDKGPhase.key_distribution)
-        return ecdkg_obj.encryption_key_part
+        return ecdkg_obj.get_signed_encryption_key_part()
 
     @dispatcher_add_async_method
     async def get_complaints(decryption_condition):

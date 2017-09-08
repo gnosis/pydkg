@@ -211,18 +211,45 @@ class ECDKG(db.Base):
                                     signature: 'rsv triplet'):
         participant = self.get_participant_by_address(sender_address)
 
-        # TODO: Check and store enc key part signature and check for existing match(?)
+        msg_bytes = (
+            b'ENCRYPTIONKEYPART' +
+            self.decryption_condition.encode() +
+            util.curve_point_to_bytes(encryption_key_part)
+        )
 
-        participant.encryption_key_part = encryption_key_part
+        recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
 
-        if all(p.encryption_key_part is not None for p in self.participants):
-            self.encryption_key = functools.reduce(
-                secp256k1.add,
-                (p.encryption_key_part for p in self.participants),
-                self.encryption_key_part
+        if sender_address != recovered_address:
+            raise ValueError(
+                'sender address {:040x} does not match recovered address {:040x}'
+                .format(sender_address, recovered_address)
             )
 
-        db.Session.commit()
+        # TODO: expand to vector and verify encryption key part
+
+        if participant.encryption_key_part is None:
+            participant.encryption_key_part = encryption_key_part
+            participant.encryption_key_part_signature = signature
+
+            if all(p.encryption_key_part is not None for p in self.participants):
+                self.encryption_key = functools.reduce(
+                    secp256k1.add,
+                    (p.encryption_key_part for p in self.participants),
+                    self.encryption_key_part
+                )
+
+            db.Session.commit()
+        elif participant.encryption_key_part != encryption_key_part:
+            participant.get_or_create_complaint_by_complainer_address(own_address)
+            raise ValueError(
+                '{:040x} sent encryption key part for {} which do not match: {} != {}'
+                .format(
+                    sender_address,
+                    self.decryption_condition,
+                    participant.encryption_key_part,
+                    encryption_key_part,
+                )
+            )
 
     def process_decryption_key_part(self,
                                     sender_address: int,
@@ -230,17 +257,44 @@ class ECDKG(db.Base):
                                     signature: 'rsv triplet'):
         participant = self.get_participant_by_address(sender_address)
 
-        # TODO: Check and store dec key part signature and check for existing match(?)
+        msg_bytes = (
+            b'DECRYPTIONKEYPART' +
+            self.decryption_condition.encode() +
+            util.private_value_to_bytes(decryption_key_part)
+        )
 
-        participant.decryption_key_part = decryption_key_part
+        recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
 
-        if all(p.decryption_key_part is not None for p in self.participants):
-            self.decryption_key = (
-                sum(p.decryption_key_part for p in self.participants) +
-                self.secret_poly1[0]
-            ) % secp256k1.N
+        if sender_address != recovered_address:
+            raise ValueError(
+                'sender address {:040x} does not match recovered address {:040x}'
+                .format(sender_address, recovered_address)
+            )
 
-        db.Session.commit()
+        # TODO: verify decryption key part
+
+        if participant.decryption_key_part is None:
+            participant.decryption_key_part = decryption_key_part
+            participant.decryption_key_part_signature = signature
+
+            if all(p.decryption_key_part is not None for p in self.participants):
+                self.decryption_key = (
+                    sum(p.decryption_key_part for p in self.participants) +
+                    self.secret_poly1[0]
+                ) % secp256k1.N
+
+            db.Session.commit()
+        elif participant.decryption_key_part != decryption_key_part:
+            participant.get_or_create_complaint_by_complainer_address(own_address)
+            raise ValueError(
+                '{:040x} sent decryption key part for {} which do not match: {} != {}'
+                .format(
+                    sender_address,
+                    self.decryption_condition,
+                    participant.decryption_key_part,
+                    decryption_key_part,
+                )
+            )
 
     async def run_until_phase(self, target_phase: ECDKGPhase):
         while self.phase < target_phase:
@@ -315,19 +369,19 @@ class ECDKG(db.Base):
         self.process_advance_to_phase(ECDKGPhase.key_generation)
 
     async def handle_key_generation_phase(self):
-        encryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_encryption_key_part', self.decryption_condition)
+        signed_encryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_signed_encryption_key_part', self.decryption_condition)
 
         for participant in self.participants:
             address = participant.eth_address
 
-            if address not in encryption_key_parts:
+            if address not in signed_encryption_key_parts:
                 # TODO: this is supposed to be broadcast... maybe try getting it from other nodes instead?
                 logging.warning('missing encryption key part from address {:040x}'.format(address))
                 continue
 
             try:
-                self.process_encryption_key_part(address, encryption_key_parts[address], None)
+                self.process_encryption_key_part(address, *signed_encryption_key_parts[address])
             except Exception as e:
                 logging.warning(
                     'exception occurred while processing encryption key part from {:040x}: {}'
@@ -339,19 +393,19 @@ class ECDKG(db.Base):
     async def handle_key_publication_phase(self):
         await util.decryption_condition_satisfied(self.decryption_condition)
 
-        decryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_decryption_key_part', self.decryption_condition)
+        signed_decryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_signed_decryption_key_part', self.decryption_condition)
 
         for p in self.participants:
             address = p.eth_address
 
-            if address not in decryption_key_parts:
+            if address not in signed_decryption_key_parts:
                 # TODO: switch to interpolation of secret shares if waiting doesn't work
                 logging.warning('missing decryption key part from address {:040x}'.format(address))
                 continue
 
             try:
-                self.process_decryption_key_part(address, decryption_key_parts[address], None)
+                self.process_decryption_key_part(address, *signed_decryption_key_parts[address])
             except Exception as e:
                 logging.warning(
                     'exception occurred while processing decryption key part from {:040x}: {}'
@@ -414,6 +468,32 @@ class ECDKG(db.Base):
 
         return (self.verification_points, signature)
 
+    def get_signed_encryption_key_part(self) -> ((int, int), 'rsv triplet'):
+        global private_key
+
+        msg_bytes = (
+            b'ENCRYPTIONKEYPART' +
+            self.decryption_condition.encode() +
+            util.curve_point_to_bytes(self.encryption_key_part)
+        )
+
+        signature = util.sign_with_key(msg_bytes, private_key)
+
+        return (self.encryption_key_part, signature)
+
+    def get_signed_decryption_key_part(self) -> (int, 'rsv triplet'):
+        global private_key
+
+        msg_bytes = (
+            b'DECRYPTIONKEYPART' +
+            self.decryption_condition.encode() +
+            util.private_value_to_bytes(self.secret_poly1[0])
+        )
+
+        signature = util.sign_with_key(msg_bytes, private_key)
+
+        return (self.secret_poly1[0], signature)
+
     def get_complaints_by(self, address: int) -> dict:
         return (
             db.Session
@@ -455,7 +535,10 @@ class ECDKGParticipant(db.Base):
     eth_address = Column(db.EthAddress, index=True)
 
     encryption_key_part = Column(db.CurvePoint)
+    encryption_key_part_signature = Column(db.Signature)
+
     decryption_key_part = Column(db.PrivateValue)
+    decryption_key_part_signature = Column(db.Signature)
 
     verification_points = Column(db.CurvePointTuple)
     verification_points_signature = Column(db.Signature)
