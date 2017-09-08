@@ -63,7 +63,7 @@ class ECDKG(db.Base):
     secret_poly1 = Column(db.Polynomial)
     secret_poly2 = Column(db.Polynomial)
     verification_points = Column(db.CurvePointTuple)
-    encryption_key_part = Column(db.CurvePoint)
+    encryption_key_vector = Column(db.CurvePointTuple)
 
     @classmethod
     def get_or_create_by_decryption_condition(cls, decryption_condition: str) -> 'ECDKG':
@@ -96,7 +96,7 @@ class ECDKG(db.Base):
         self.secret_poly1 = spoly1
         self.secret_poly2 = spoly2
 
-        self.encryption_key_part = secp256k1.multiply(secp256k1.G, self.secret_poly1[0])
+        self.encryption_key_vector = tuple(secp256k1.multiply(secp256k1.G, coeff) for coeff in self.secret_poly1)
 
         self.verification_points = tuple(
             secp256k1.add(secp256k1.multiply(secp256k1.G, a), secp256k1.multiply(G2, b))
@@ -205,16 +205,17 @@ class ECDKG(db.Base):
 
         participant.get_or_create_complaint_by_complainer_address(own_address)
 
-    def process_encryption_key_part(self,
-                                    sender_address: int,
-                                    encryption_key_part: (int, int),
-                                    signature: 'rsv triplet'):
+    def process_encryption_key_vector(self,
+                                      sender_address: int,
+                                      encryption_key_vector: tuple,
+                                      signature: 'rsv triplet'):
+        global own_address
         participant = self.get_participant_by_address(sender_address)
 
         msg_bytes = (
             b'ENCRYPTIONKEYPART' +
             self.decryption_condition.encode() +
-            util.curve_point_to_bytes(encryption_key_part)
+            util.curve_point_tuple_to_bytes(encryption_key_vector)
         )
 
         recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
@@ -225,29 +226,39 @@ class ECDKG(db.Base):
                 .format(sender_address, recovered_address)
             )
 
-        # TODO: expand to vector and verify encryption key part
+        if participant.encryption_key_vector is None:
+            lhs = secp256k1.multiply(secp256k1.G, participant.secret_share1)
+            rhs = functools.reduce(
+                secp256k1.add,
+                (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N))
+                    for k, ps in enumerate(encryption_key_vector)))
+            if lhs != rhs:
+                participant.get_or_create_complaint_by_complainer_address(own_address)
+                raise ValueError(
+                    '{:040x} sent enc key vector which does not match previously sent secret share'
+                    .format(sender_address)
+                )
 
-        if participant.encryption_key_part is None:
-            participant.encryption_key_part = encryption_key_part
-            participant.encryption_key_part_signature = signature
+            participant.encryption_key_vector = encryption_key_vector
+            participant.encryption_key_vector_signature = signature
 
-            if all(p.encryption_key_part is not None for p in self.participants):
+            if all(p.encryption_key_vector is not None for p in self.participants):
                 self.encryption_key = functools.reduce(
                     secp256k1.add,
-                    (p.encryption_key_part for p in self.participants),
-                    self.encryption_key_part
+                    (p.encryption_key_vector[0] for p in self.participants),
+                    self.encryption_key_vector[0]
                 )
 
             db.Session.commit()
-        elif participant.encryption_key_part != encryption_key_part:
+        elif participant.encryption_key_vector != encryption_key_vector:
             participant.get_or_create_complaint_by_complainer_address(own_address)
             raise ValueError(
                 '{:040x} sent encryption key part for {} which do not match: {} != {}'
                 .format(
                     sender_address,
                     self.decryption_condition,
-                    participant.encryption_key_part,
-                    encryption_key_part,
+                    participant.encryption_key_vector,
+                    encryption_key_vector,
                 )
             )
 
@@ -369,19 +380,19 @@ class ECDKG(db.Base):
         self.process_advance_to_phase(ECDKGPhase.key_generation)
 
     async def handle_key_generation_phase(self):
-        signed_encryption_key_parts = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_signed_encryption_key_part', self.decryption_condition)
+        signed_encryption_key_vectors = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_signed_encryption_key_vector', self.decryption_condition)
 
         for participant in self.participants:
             address = participant.eth_address
 
-            if address not in signed_encryption_key_parts:
+            if address not in signed_encryption_key_vectors:
                 # TODO: this is supposed to be broadcast... maybe try getting it from other nodes instead?
                 logging.warning('missing encryption key part from address {:040x}'.format(address))
                 continue
 
             try:
-                self.process_encryption_key_part(address, *signed_encryption_key_parts[address])
+                self.process_encryption_key_vector(address, *signed_encryption_key_vectors[address])
             except Exception as e:
                 logging.warning(
                     'exception occurred while processing encryption key part from {:040x}: {}'
@@ -468,18 +479,18 @@ class ECDKG(db.Base):
 
         return (self.verification_points, signature)
 
-    def get_signed_encryption_key_part(self) -> ((int, int), 'rsv triplet'):
+    def get_signed_encryption_key_vector(self) -> ((int, int), 'rsv triplet'):
         global private_key
 
         msg_bytes = (
             b'ENCRYPTIONKEYPART' +
             self.decryption_condition.encode() +
-            util.curve_point_to_bytes(self.encryption_key_part)
+            util.curve_point_tuple_to_bytes(self.encryption_key_vector)
         )
 
         signature = util.sign_with_key(msg_bytes, private_key)
 
-        return (self.encryption_key_part, signature)
+        return (self.encryption_key_vector, signature)
 
     def get_signed_decryption_key_part(self) -> (int, 'rsv triplet'):
         global private_key
@@ -515,14 +526,15 @@ class ECDKG(db.Base):
 
         msg['participants'] = {'{:040x}'.format(p.eth_address): p.to_state_message() for p in self.participants}
 
-        for attr in ('encryption_key', 'encryption_key_part'):
+        for attr in ('encryption_key',):
             val = getattr(self, attr)
             if val is not None:
                 msg[attr] = '{0[0]:064x}{0[1]:064x}'.format(val)
 
-        vpts = self.verification_points
-        if vpts is not None:
-            msg['verification_points'] = tuple('{0[0]:064x}{0[1]:064x}'.format(pt) for pt in vpts)
+        for attr in ('verification_points', 'encryption_key_vector'):
+            val = getattr(self, attr)
+            if val is not None:
+                msg[attr] = tuple('{0[0]:064x}{0[1]:064x}'.format(pt) for pt in val)
 
         return msg
 
@@ -534,8 +546,8 @@ class ECDKGParticipant(db.Base):
     ecdkg = relationship('ECDKG', back_populates='participants')
     eth_address = Column(db.EthAddress, index=True)
 
-    encryption_key_part = Column(db.CurvePoint)
-    encryption_key_part_signature = Column(db.Signature)
+    encryption_key_vector = Column(db.CurvePointTuple)
+    encryption_key_vector_signature = Column(db.Signature)
 
     decryption_key_part = Column(db.PrivateValue)
     decryption_key_part_signature = Column(db.Signature)
@@ -570,10 +582,10 @@ class ECDKGParticipant(db.Base):
     def to_state_message(self, address: int = None) -> dict:
         msg = {}
 
-        for attr in ('encryption_key_part', 'verification_points'):
+        for attr in ('verification_points', 'encryption_key_vector'):
             val = getattr(self, attr)
             if val is not None:
-                msg[attr] = '{0[0]:064x}{0[1]:064x}'.format(val)
+                msg[attr] = tuple('{0[0]:064x}{0[1]:064x}'.format(pt) for pt in val)
 
         return msg
 

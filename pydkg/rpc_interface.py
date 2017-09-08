@@ -58,11 +58,11 @@ def create_dispatcher(address: int = None):
         return ecdkg_obj.get_signed_verification_points()
 
     @dispatcher_add_async_method
-    async def get_signed_encryption_key_part(decryption_condition):
+    async def get_signed_encryption_key_vector(decryption_condition):
         ecdkg_obj = ecdkg.ECDKG.get_or_create_by_decryption_condition(decryption_condition)
         # await ecdkg_obj.run_until_phase(ecdkg.ECDKGPhase.key_generation)
         await ecdkg_obj.run_until_phase(ecdkg.ECDKGPhase.key_distribution)
-        return ecdkg_obj.get_signed_encryption_key_part()
+        return ecdkg_obj.get_signed_encryption_key_vector()
 
     @dispatcher_add_async_method
     async def get_complaints(decryption_condition):
