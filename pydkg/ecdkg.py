@@ -288,9 +288,14 @@ class ECDKG(db.Base):
                 .format(sender_address, recovered_address)
             )
 
-        # TODO: verify decryption key part
-
         if participant.decryption_key_part is None:
+            if secp256k1.multiply(secp256k1.G, decryption_key_part) != participant.encryption_key_vector[0]:
+                participant.get_or_create_complaint_by_complainer_address(own_address)
+                raise ValueError(
+                    '{:040x} sent dec key part which does not match previously sent enc key vector'
+                    .format(sender_address)
+                )
+
             participant.decryption_key_part = decryption_key_part
             participant.decryption_key_part_signature = signature
 
