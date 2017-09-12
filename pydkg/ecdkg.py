@@ -137,6 +137,10 @@ class ECDKG(db.Base):
             participant.shares_signature = signature
 
             db.Session.commit()
+
+            if participant.verification_points is not None:
+                self.process_secret_share_verification(sender_address)
+
         elif participant.secret_share1 != share1 or participant.secret_share2 != share2:
             participant.get_or_create_complaint_by_complainer_address(own_address)
             raise ValueError(
@@ -172,6 +176,10 @@ class ECDKG(db.Base):
             participant.verification_points_signature = signature
 
             db.Session.commit()
+
+            if participant.secret_share1 is not None and participant.secret_share2 is not None:
+                self.process_secret_share_verification(sender_address)
+
         elif participant.verification_points != verification_points:
             participant.get_or_create_complaint_by_complainer_address(own_address)
             raise ValueError(
@@ -191,17 +199,15 @@ class ECDKG(db.Base):
         share1 = participant.secret_share1
         share2 = participant.secret_share2
 
-        # TODO: Determine whether this check is necessary
-        if share1 is not None and share2 is not None:
-            vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
-                                 secp256k1.multiply(G2, share2))
-            vrhs = functools.reduce(
-                secp256k1.add,
-                (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N))
-                    for k, ps in enumerate(participant.verification_points)))
+        vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
+                             secp256k1.multiply(G2, share2))
+        vrhs = functools.reduce(
+            secp256k1.add,
+            (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N))
+                for k, ps in enumerate(participant.verification_points)))
 
-            if vlhs == vrhs:
-                return
+        if vlhs == vrhs:
+            return
 
         participant.get_or_create_complaint_by_complainer_address(own_address)
 
@@ -353,15 +359,6 @@ class ECDKG(db.Base):
         self.process_advance_to_phase(ECDKGPhase.key_verification)
 
     async def handle_key_verification_phase(self):
-        for participant in self.participants:
-            try:
-                self.process_secret_share_verification(participant.eth_address)
-            except Exception as e:
-                logging.warning(
-                    'exception occurred while verifying shares from {:040x}: {}'
-                    .format(participant.eth_address, e)
-                )
-
         self.process_advance_to_phase(ECDKGPhase.key_check)
 
     async def handle_key_check_phase(self):
