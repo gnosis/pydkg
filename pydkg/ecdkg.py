@@ -39,6 +39,57 @@ def generate_public_shares(poly1, poly2):
     return (secp256k1.add(secp256k1.multiply(secp256k1.G, a), secp256k1.multiply(G2, b)) for a, b in zip(poly1, poly2))
 
 
+class ECDKGNode(db.Base):
+    __tablename__ = 'ecdkg_node'
+
+    private_key = Column(db.PrivateValue, index=True, unique=True)
+    protocol_instances = relationship('ECDKG', back_populates='node')
+
+    @property
+    def public_key(self):
+        return secp256k1.multiply(secp256k1.G, self.private_key)
+
+    @property
+    def address(self):
+        return util.curve_point_to_eth_address(self.public_key)
+
+    @classmethod
+    def get_by_private_key(cls, private_key: int) -> 'ECDKGNode':
+        node = (
+            db.Session
+            .query(cls)
+            .filter(cls.private_key == private_key)
+            .scalar()
+        )
+
+        if node is None:
+            node = ECDKGNode(private_key=private_key)
+            db.Session.add(node)
+            db.Session.commit()
+
+        return node
+
+    def get_protocol_instance_by_decryption_condition(self, decryption_condition: str) -> 'ECDKG':
+        decryption_condition = util.normalize_decryption_condition(decryption_condition)
+        ecdkg_obj = (
+            db.Session
+            .query(ECDKG)
+            .filter(
+                ECDKG.node_id == self.id,
+                ECDKG.decryption_condition == decryption_condition,
+            )
+            .scalar()
+        )
+
+        if ecdkg_obj is None:
+            ecdkg_obj = ECDKG(node_id=self.id, decryption_condition=decryption_condition)
+            db.Session.add(ecdkg_obj)
+            ecdkg_obj.init()
+            db.Session.commit()
+
+        return ecdkg_obj
+
+
 @enum.unique
 class ECDKGPhase(enum.IntEnum):
     uninitialized = 0
@@ -53,7 +104,10 @@ class ECDKGPhase(enum.IntEnum):
 class ECDKG(db.Base):
     __tablename__ = 'ecdkg'
 
-    decryption_condition = Column(types.String(32), index=True, unique=True)
+    node_id = Column(types.Integer, ForeignKey('ecdkg_node.id'))
+    node = relationship('ECDKGNode', back_populates='protocol_instances')
+
+    decryption_condition = Column(types.String(32), index=True)
     phase = Column(types.Enum(ECDKGPhase), nullable=False, default=ECDKGPhase.uninitialized)
     threshold = Column(types.Integer)
     encryption_key = Column(db.CurvePoint)
@@ -65,23 +119,7 @@ class ECDKG(db.Base):
     verification_points = Column(db.CurvePointTuple)
     encryption_key_vector = Column(db.CurvePointTuple)
 
-    @classmethod
-    def get_or_create_by_decryption_condition(cls, decryption_condition: str) -> 'ECDKG':
-        decryption_condition = util.normalize_decryption_condition(decryption_condition)
-        ecdkg_obj = (
-            db.Session
-            .query(cls)
-            .filter(cls.decryption_condition == decryption_condition)
-            .scalar()
-        )
-
-        if ecdkg_obj is None:
-            ecdkg_obj = cls(decryption_condition=decryption_condition)
-            db.Session.add(ecdkg_obj)
-            ecdkg_obj.init()
-            db.Session.commit()
-
-        return ecdkg_obj
+    __table_args__ = (UniqueConstraint('node_id', 'decryption_condition'),)
 
     def init(self):
         for addr in networking.channels.keys():
@@ -111,7 +149,7 @@ class ECDKG(db.Base):
             db.Session.commit()
 
     def process_secret_shares(self, sender_address: int, secret_shares: (int, int), signature: 'rsv triplet'):
-        global own_address
+        own_address = self.node.address
         participant = self.get_participant_by_address(sender_address)
         share1, share2 = secret_shares
 
@@ -154,7 +192,7 @@ class ECDKG(db.Base):
             )
 
     def process_verification_points(self, sender_address: int, verification_points: tuple, signature: 'rsv triplet'):
-        global own_address
+        own_address = self.node.address
         participant = self.get_participant_by_address(sender_address)
 
         msg_bytes = (
@@ -193,7 +231,7 @@ class ECDKG(db.Base):
             )
 
     def process_secret_share_verification(self, address: int):
-        global own_address
+        own_address = self.node.address
         participant = self.get_participant_by_address(address)
 
         share1 = participant.secret_share1
@@ -215,7 +253,7 @@ class ECDKG(db.Base):
                                       sender_address: int,
                                       encryption_key_vector: tuple,
                                       signature: 'rsv triplet'):
-        global own_address
+        own_address = self.node.address
         participant = self.get_participant_by_address(sender_address)
 
         msg_bytes = (
@@ -451,7 +489,7 @@ class ECDKG(db.Base):
             return participant
 
     def get_signed_secret_shares(self, address: int) -> ((int, int), 'rsv triplet'):
-        global private_key
+        private_key = self.node.private_key
 
         secret_shares = (eval_polynomial(self.secret_poly1, address),
                          eval_polynomial(self.secret_poly2, address))
@@ -469,7 +507,7 @@ class ECDKG(db.Base):
         return (secret_shares, signature)
 
     def get_signed_verification_points(self) -> (tuple, 'rsv triplet'):
-        global private_key
+        private_key = self.node.private_key
 
         msg_bytes = (
             b'VERIFICATIONPOINTS' +
@@ -482,7 +520,7 @@ class ECDKG(db.Base):
         return (self.verification_points, signature)
 
     def get_signed_encryption_key_vector(self) -> ((int, int), 'rsv triplet'):
-        global private_key
+        private_key = self.node.private_key
 
         msg_bytes = (
             b'ENCRYPTIONKEYPART' +
@@ -495,7 +533,7 @@ class ECDKG(db.Base):
         return (self.encryption_key_vector, signature)
 
     def get_signed_decryption_key_part(self) -> (int, 'rsv triplet'):
-        global private_key
+        private_key = self.node.private_key
 
         msg_bytes = (
             b'DECRYPTIONKEYPART' +
@@ -517,7 +555,7 @@ class ECDKG(db.Base):
         )
 
     def to_state_message(self) -> dict:
-        global own_address
+        own_address = self.node.address
 
         msg = {'address': '{:040x}'.format(own_address)}
 

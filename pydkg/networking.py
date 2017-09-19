@@ -51,7 +51,6 @@ class HTTPRequest(BaseHTTPRequestHandler):
 
 
 channels = {}
-default_dispatcher = rpc_interface.create_dispatcher()
 response_futures = collections.OrderedDict()
 
 
@@ -67,6 +66,7 @@ async def json_lines_with_timeout(reader: asyncio.StreamReader, timeout: 'second
 async def establish_channel(eth_address: int,
                             reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter,
+                            node: ecdkg.ECDKGNode,
                             location: (str, int) = None):
     if eth_address not in channels:
         channels[eth_address] = {}
@@ -79,7 +79,7 @@ async def establish_channel(eth_address: int,
 
     channels[eth_address]['reader'] = reader
     channels[eth_address]['writer'] = writer
-    channels[eth_address]['rpcdispatcher'] = rpc_interface.create_dispatcher(eth_address)
+    channels[eth_address]['rpcdispatcher'] = rpc_interface.create_dispatcher(node, eth_address)
     if location is not None:
         channels[eth_address]['location'] = location
 
@@ -213,12 +213,13 @@ async def determine_address_via_nonce(reader: asyncio.StreamReader,
 
 async def respond_to_nonce_with_signature(reader: asyncio.StreamReader,
                                           writer: asyncio.StreamWriter,
+                                          private_key: int,
                                           timeout: 'seconds' = DEFAULT_TIMEOUT):
     noncebytes = await asyncio.wait_for(reader.read(32), timeout)
     nonce = int.from_bytes(noncebytes, byteorder='big')
     logging.debug('got nonce: {:064x}'.format(nonce))
 
-    signature = util.sign_with_key(noncebytes, ecdkg.private_key, hash=None)
+    signature = util.sign_with_key(noncebytes, private_key, hash=None)
     logging.debug('sending nonce signature rsv ({:064x}, {:064x}, {:02x})'.format(*signature))
     writer.write(util.signature_to_bytes(signature))
 
@@ -235,9 +236,11 @@ async def emit_heartbeats():
 
 ################################################################################
 
-async def server(host: str, port: int, *,
+async def server(host: str, port: int, node: ecdkg.ECDKGNode, accepted_addresses: set, *,
                  timeout: 'seconds' = DEFAULT_TIMEOUT,
                  loop: asyncio.AbstractEventLoop):
+
+    default_dispatcher = rpc_interface.create_dispatcher(node)
 
     async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -248,18 +251,18 @@ async def server(host: str, port: int, *,
             protocol_indicator = await asyncio.wait_for(reader.read(4), timeout)
 
             if protocol_indicator == b'DKG ':
-                await respond_to_nonce_with_signature(reader, writer, timeout)
+                await respond_to_nonce_with_signature(reader, writer, node.private_key, timeout)
                 cliethaddr = await determine_address_via_nonce(reader, writer, timeout)
 
                 if cliethaddr is None:
                     logging.debug('(s) could not verify client signature; closing connection')
                     return
 
-                if cliethaddr not in ecdkg.accepted_addresses:
+                if cliethaddr not in accepted_addresses:
                     logging.debug('(s) client address {:40x} not accepted'.format(cliethaddr))
                     return
 
-                await establish_channel(cliethaddr, reader, writer)
+                await establish_channel(cliethaddr, reader, writer, node)
 
             elif len(protocol_indicator) > 0:
                 req = HTTPRequest(protocol_indicator + await asyncio.wait_for(reader.readline(), timeout), reader)
@@ -294,7 +297,7 @@ async def server(host: str, port: int, *,
 
 ################################################################################
 
-async def attempt_to_establish_channel(host: str, port: int, *,
+async def attempt_to_establish_channel(host: str, port: int, node: ecdkg.ECDKGNode, accepted_addresses: set, *,
                                        timeout: 'seconds' = DEFAULT_TIMEOUT,
                                        num_tries: int = 6):
 
@@ -328,7 +331,7 @@ async def attempt_to_establish_channel(host: str, port: int, *,
             logging.info('(c) could not determine server address; closing connection...')
             return
 
-        if srvethaddr not in ecdkg.accepted_addresses:
+        if srvethaddr not in accepted_addresses:
             logging.debug('(c) server eth address {:040x} not accepted'.format(srvethaddr))
             return
 
@@ -336,8 +339,8 @@ async def attempt_to_establish_channel(host: str, port: int, *,
             logging.info('(c) already connected to {:040x}; ending connection attempt'.format(srvethaddr))
             return
 
-        await respond_to_nonce_with_signature(reader, writer, timeout)
+        await respond_to_nonce_with_signature(reader, writer, node.private_key, timeout)
 
-        await establish_channel(srvethaddr, reader, writer, srvipaddr)
+        await establish_channel(srvethaddr, reader, writer, node, srvipaddr)
     finally:
         writer.close()
