@@ -4,6 +4,7 @@ import functools
 import itertools
 import logging
 import math
+import sha3
 
 from py_ecc.secp256k1 import secp256k1
 
@@ -51,6 +52,8 @@ class ECDKGPhase(enum.IntEnum):
 
 
 class ECDKG(db.Base):
+    __tablename__ = 'ecdkg'
+
     decryption_condition = db.Column(db.String(32), index=True, unique=True)
     phase = db.Column(db.Enum(ECDKGPhase), nullable=False, default=ECDKGPhase.uninitialized)
     threshold = db.Column(db.Integer)
@@ -80,7 +83,7 @@ class ECDKG(db.Base):
         return ecdkg_obj
 
 
-    async def run_until_phase(self, target_phase):
+    async def run_until_phase(self, target_phase: ECDKGPhase):
         while self.phase < target_phase:
             logging.info('handling {} phase...'.format(self.phase.name))
             await getattr(self, 'handle_{}_phase'.format(self.phase.name))()
@@ -108,18 +111,43 @@ class ECDKG(db.Base):
 
 
     async def handle_key_distribution_phase(self):
-        secret_shares = await networking.broadcast_jsonrpc_call_on_all_channels(
-            'get_secret_shares', self.decryption_condition)
+        global own_address
+
+        signed_secret_shares = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_signed_secret_shares', self.decryption_condition)
 
         for participant in self.participants:
             address = participant.eth_address
 
-            if address in secret_shares:
-                share1, share2 = (int(s, 16) for s in secret_shares[address])
-                participant.secret_share1 = share1
-                participant.secret_share2 = share2
-            else:
+            if address not in signed_secret_shares:
                 logging.warning('missing share from address {:040x}'.format(address))
+                continue
+
+            (share1, share2), signature = signed_secret_shares[address]
+
+            try:
+                msg_bytes = (
+                    self.decryption_condition.encode() +
+                    util.address_to_bytes(own_address) +
+                    b'SECRETSHARES' +
+                    util.private_value_to_bytes(share1) +
+                    util.private_value_to_bytes(share2)
+                )
+
+                recovered_address = util.address_from_message_and_signature(msg_bytes, signature)
+
+            except ValueError as e:
+                logging.warning('signature from address {:040x} could not be verified: {}'.format(address, e))
+                continue
+
+            if address != recovered_address:
+                logging.warning('address of channel {:040x} does not match recovered address {:040x}'
+                    .format(address, recovered_address))
+                continue
+
+            participant.secret_share1 = share1
+            participant.secret_share2 = share2
+            participant.shares_signature = signature
 
         logging.info('set all secret shares')
         verification_points = await networking.broadcast_jsonrpc_call_on_all_channels(
@@ -145,22 +173,29 @@ class ECDKG(db.Base):
 
             if share1 is not None and share2 is not None:
                 vlhs = secp256k1.add(secp256k1.multiply(secp256k1.G, share1),
-                                        secp256k1.multiply(G2, share2))
+                                     secp256k1.multiply(G2, share2))
                 vrhs = functools.reduce(secp256k1.add, (secp256k1.multiply(ps, pow(own_address, k, secp256k1.N)) for k, ps in enumerate(participant.verification_points)))
 
-                if vlhs != vrhs:
-                    # TODO: Produce complaints and continue instead of halting here
-                    raise ProtocolError('verification of shares failed')
-            else:
-                # TODO: Produce complaints and continue instead of halting here
-                raise ProtocolError('missing share from address {:040x}'.format(address))
+                if vlhs == vrhs:
+                    continue
+
+            complaint = participant.get_or_create_complaint_by_complainer_address(own_address)
 
         self.phase = ECDKGPhase.key_check
         db.Session.commit()
 
 
     async def handle_key_check_phase(self):
-        # TODO: Get complaints and filter qualifying set
+        complaints = await networking.broadcast_jsonrpc_call_on_all_channels(
+            'get_complaints', self.decryption_condition)
+
+        for participant in self.participants:
+            complainer_address = participant.eth_address
+
+            if complainer_address in complaints:
+                # TODO: Add complaints and collect responses to complaints
+                pass
+
         self.phase = ECDKGPhase.key_generation
         db.Session.commit()
 
@@ -222,9 +257,32 @@ class ECDKG(db.Base):
         return participant
 
 
-    def get_secret_shares(self, address: int) -> (int, int):
-        return (eval_polynomial(self.secret_poly1, address),
-                eval_polynomial(self.secret_poly2, address))
+    def get_signed_secret_shares(self, address: int) -> ((int, int), 'rsv triplet'):
+        global private_key
+
+        secret_shares = (eval_polynomial(self.secret_poly1, address),
+                         eval_polynomial(self.secret_poly2, address))
+
+        msg_bytes = (
+            self.decryption_condition.encode() +
+            util.address_to_bytes(address) +
+            b'SECRETSHARES' +
+            util.private_value_to_bytes(secret_shares[0]) +
+            util.private_value_to_bytes(secret_shares[1])
+        )
+
+        signature = util.sign_with_key(msg_bytes, private_key)
+
+        return (secret_shares, signature)
+
+
+    def get_complaints_by(self, address: int) -> dict:
+        return (db.Session
+            .query(ECDKGComplaint)
+            .filter(#ECDKGComplaint.participant.ecdkg_id == self.id,
+                    ECDKGComplaint.complainer_address == address)
+            .all())
+
 
 
     def to_state_message(self) -> dict:
@@ -252,6 +310,8 @@ class ECDKG(db.Base):
 
 
 class ECDKGParticipant(db.Base):
+    __tablename__ = 'ecdkg_participant'
+
     ecdkg_id = db.Column(db.Integer, db.ForeignKey('ecdkg.id'))
     ecdkg = db.relationship('ECDKG', back_populates='participants')
     eth_address = db.Column(db.EthAddress, index=True)
@@ -261,7 +321,28 @@ class ECDKGParticipant(db.Base):
     verification_points = db.Column(db.CurvePointTuple)
     secret_share1 = db.Column(db.PrivateValue)
     secret_share2 = db.Column(db.PrivateValue)
+    shares_signature = db.Column(db.Signature)
+
+    complaints = db.relationship('ECDKGComplaint', back_populates='participant')
+
     __table_args__ = (db.UniqueConstraint('ecdkg_id', 'eth_address'),)
+
+
+    def get_or_create_complaint_by_complainer_address(self, address: int) -> 'ECDKGComplaint':
+        complaint = (db.Session
+            .query(ECDKGComplaint)
+            .filter(ECDKGComplaint.participant_id == self.id,
+                    ECDKGComplaint.complainer_address == address)
+            .scalar())
+
+        if participant is None:
+            participant = ECDKGParticipant(ecdkg_id=self.id, eth_address=address)
+            db.Session.add(participant)
+            db.Session.commit()
+
+        sfid = (self.id, address)
+
+        return participant
 
 
     def to_state_message(self, address: int = None) -> dict:
@@ -273,3 +354,13 @@ class ECDKGParticipant(db.Base):
                 msg[attr] = '{0[0]:064x}{0[1]:064x}'.format(val)
 
         return msg
+
+
+class ECDKGComplaint(db.Base):
+    __tablename__ = 'ecdkg_complaint'
+
+    participant_id = db.Column(db.Integer, db.ForeignKey('ecdkg_participant.id'))
+    participant = db.relationship('ECDKGParticipant', back_populates='complaints')
+    complainer_address = db.Column(db.EthAddress, index=True)
+
+    __table_args__ = (db.UniqueConstraint('participant_id', 'complainer_address'),)

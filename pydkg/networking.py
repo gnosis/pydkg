@@ -199,19 +199,17 @@ async def determine_address_via_nonce(reader: asyncio.StreamReader,
     writer.write(nonce.to_bytes(32, byteorder='big'))
 
     rsv_bytes = await asyncio.wait_for(reader.read(65), timeout)
-    r, s, v = (int.from_bytes(b, byteorder='big') for b in (rsv_bytes[0:32], rsv_bytes[32:64], rsv_bytes[64:]))
-    logging.debug('received signature rsv ({:064x}, {:064x}, {:02x})'.format(r, s, v))
+    signature = util.bytes_to_signature(rsv_bytes)
+    logging.debug('received signature rsv ({:064x}, {:064x}, {:02x})'.format(*signature))
 
     try:
-        clipubkey = secp256k1.ecdsa_raw_recover(noncebytes, (v, r, s))
-    except ValueError:
-        logging.debug('malformed signature')
+        address = util.address_from_message_and_signature(noncebytes, signature, hash=None)
+    except ValueError as err:
+        logging.debug('could not recover address: {}'.format(err))
         return None
 
-    if clipubkey:
-        cliethaddr = util.curve_point_to_eth_address(clipubkey)
-        logging.debug('got client address: {:040x}'.format(cliethaddr))
-        return cliethaddr
+    logging.debug('got address: {:040x}'.format(address))
+    return address
 
 
 async def respond_to_nonce_with_signature(reader: asyncio.StreamReader,
@@ -221,9 +219,9 @@ async def respond_to_nonce_with_signature(reader: asyncio.StreamReader,
     nonce = int.from_bytes(noncebytes, byteorder='big')
     logging.debug('got nonce: {:064x}'.format(nonce))
 
-    v, r, s = secp256k1.ecdsa_raw_sign(noncebytes, ecdkg.private_key)
-    logging.debug('sending nonce signature rsv ({:064x}, {:064x}, {:02x})'.format(r, s, v))
-    writer.write(r.to_bytes(32, 'big') + s.to_bytes(32, 'big') + v.to_bytes(1, 'big'))
+    signature = util.sign_with_key(noncebytes, ecdkg.private_key, hash=None)
+    logging.debug('sending nonce signature rsv ({:064x}, {:064x}, {:02x})'.format(*signature))
+    writer.write(util.signature_to_bytes(signature))
 
 
 ################################################################################
