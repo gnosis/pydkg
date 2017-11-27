@@ -1,22 +1,11 @@
 import asyncio
 import collections
-import datetime
 import json
 import logging
-import os
-import ssl
-import tempfile
 import uuid
 
 from http.server import BaseHTTPRequestHandler
 
-from py_ecc.secp256k1 import secp256k1
-
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
 from jsonrpc import JSONRPCResponseManager
 
 from . import util, ecdkg, rpc_interface, db
@@ -35,6 +24,7 @@ class HTTPRequest(BaseHTTPRequestHandler):
         self.raw_requestline = raw_requestline
         self.stream_reader = stream_reader
         self.error_code = self.error_message = None
+
         def rfile_readline(_):
             gen = self.stream_reader.readline()
             try:
@@ -53,10 +43,14 @@ class HTTPRequest(BaseHTTPRequestHandler):
         return '<{module}.{classname}\n {desc}>'.format(
             module=__name__,
             classname=self.__class__.__name__,
-            desc='\n '.join('{}={}'.format(attr, ('\n  '+' '*len(attr)).join(filter(bool, str(getattr(self, attr, None)).split('\n')))) for attr in ('command', 'path', 'headers')))
+            desc='\n '.join(
+                '{}={}'.format(
+                    attr,
+                    ('\n  '+' '*len(attr)).join(filter(bool, str(getattr(self, attr, None)).split('\n'))))
+                for attr in ('command', 'path', 'headers')))
+
 
 channels = {}
-default_dispatcher = rpc_interface.create_dispatcher()
 response_futures = collections.OrderedDict()
 
 
@@ -69,7 +63,11 @@ async def json_lines_with_timeout(reader: asyncio.StreamReader, timeout: 'second
             pass
 
 
-async def establish_channel(eth_address: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, location: (str, int) = None):
+async def establish_channel(eth_address: int,
+                            reader: asyncio.StreamReader,
+                            writer: asyncio.StreamWriter,
+                            node: ecdkg.ECDKGNode,
+                            location: (str, int) = None):
     if eth_address not in channels:
         channels[eth_address] = {}
 
@@ -81,7 +79,7 @@ async def establish_channel(eth_address: int, reader: asyncio.StreamReader, writ
 
     channels[eth_address]['reader'] = reader
     channels[eth_address]['writer'] = writer
-    channels[eth_address]['rpcdispatcher'] = rpc_interface.create_dispatcher(eth_address)
+    channels[eth_address]['rpcdispatcher'] = rpc_interface.create_dispatcher(node, eth_address)
     if location is not None:
         channels[eth_address]['location'] = location
 
@@ -127,9 +125,11 @@ def make_jsonrpc_call(cinfo: 'channel info',
     if loop is None:
         loop = asyncio.get_event_loop()
 
-    msg = { 'method': method_name,
-            'params': args,
-            'jsonrpc': '2.0' }
+    msg = {
+        'method': method_name,
+        'params': args,
+        'jsonrpc': '2.0',
+    }
 
     if 'writer' in cinfo:
         if not is_notification:
@@ -153,8 +153,7 @@ async def get_response_data(res: 'jsonrpc response', timeout: 'seconds' = DEFAUL
     if res is not None:
         res_data = res.data
         if 'result' in res_data:
-            if (asyncio.iscoroutine(res_data['result']) or
-                isinstance(res_data['result'], asyncio.Future)):
+            if (asyncio.iscoroutine(res_data['result']) or isinstance(res_data['result'], asyncio.Future)):
                 res_data['result'] = await asyncio.wait_for(res_data['result'], timeout)
         return res_data
 
@@ -214,12 +213,13 @@ async def determine_address_via_nonce(reader: asyncio.StreamReader,
 
 async def respond_to_nonce_with_signature(reader: asyncio.StreamReader,
                                           writer: asyncio.StreamWriter,
+                                          private_key: int,
                                           timeout: 'seconds' = DEFAULT_TIMEOUT):
     noncebytes = await asyncio.wait_for(reader.read(32), timeout)
     nonce = int.from_bytes(noncebytes, byteorder='big')
     logging.debug('got nonce: {:064x}'.format(nonce))
 
-    signature = util.sign_with_key(noncebytes, ecdkg.private_key, hash=None)
+    signature = util.sign_with_key(noncebytes, private_key, hash=None)
     logging.debug('sending nonce signature rsv ({:064x}, {:064x}, {:02x})'.format(*signature))
     writer.write(util.signature_to_bytes(signature))
 
@@ -236,9 +236,11 @@ async def emit_heartbeats():
 
 ################################################################################
 
-async def server(host: str, port: int, *,
+async def server(host: str, port: int, node: ecdkg.ECDKGNode, accepted_addresses: set, *,
                  timeout: 'seconds' = DEFAULT_TIMEOUT,
                  loop: asyncio.AbstractEventLoop):
+
+    default_dispatcher = rpc_interface.create_dispatcher(node)
 
     async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -249,18 +251,18 @@ async def server(host: str, port: int, *,
             protocol_indicator = await asyncio.wait_for(reader.read(4), timeout)
 
             if protocol_indicator == b'DKG ':
-                await respond_to_nonce_with_signature(reader, writer, timeout)
+                await respond_to_nonce_with_signature(reader, writer, node.private_key, timeout)
                 cliethaddr = await determine_address_via_nonce(reader, writer, timeout)
 
                 if cliethaddr is None:
                     logging.debug('(s) could not verify client signature; closing connection')
                     return
 
-                if cliethaddr not in ecdkg.accepted_addresses:
+                if cliethaddr not in accepted_addresses:
                     logging.debug('(s) client address {:40x} not accepted'.format(cliethaddr))
                     return
 
-                await establish_channel(cliethaddr, reader, writer)
+                await establish_channel(cliethaddr, reader, writer, node)
 
             elif len(protocol_indicator) > 0:
                 req = HTTPRequest(protocol_indicator + await asyncio.wait_for(reader.readline(), timeout), reader)
@@ -293,10 +295,9 @@ async def server(host: str, port: int, *,
                                host, port, loop=loop)
 
 
-
 ################################################################################
 
-async def attempt_to_establish_channel(host: str, port: int, *,
+async def attempt_to_establish_channel(host: str, port: int, node: ecdkg.ECDKGNode, accepted_addresses: set, *,
                                        timeout: 'seconds' = DEFAULT_TIMEOUT,
                                        num_tries: int = 6):
 
@@ -305,7 +306,7 @@ async def attempt_to_establish_channel(host: str, port: int, *,
         try:
             reader, writer = await asyncio.open_connection(host, port)
         except OSError as e:
-            if e.errno == 111 or '[Errno 111]' in str(e): # connection refused
+            if e.errno == 111 or '[Errno 111]' in str(e):  # connection refused
                 if i < num_tries - 1:
                     wait_time = 5 * 2**i
                     logging.debug('(c) connection to {}:{} refused; trying again in {}s'.format(host, port, wait_time))
@@ -330,7 +331,7 @@ async def attempt_to_establish_channel(host: str, port: int, *,
             logging.info('(c) could not determine server address; closing connection...')
             return
 
-        if srvethaddr not in ecdkg.accepted_addresses:
+        if srvethaddr not in accepted_addresses:
             logging.debug('(c) server eth address {:040x} not accepted'.format(srvethaddr))
             return
 
@@ -338,8 +339,8 @@ async def attempt_to_establish_channel(host: str, port: int, *,
             logging.info('(c) already connected to {:040x}; ending connection attempt'.format(srvethaddr))
             return
 
-        await respond_to_nonce_with_signature(reader, writer, timeout)
+        await respond_to_nonce_with_signature(reader, writer, node.private_key, timeout)
 
-        await establish_channel(srvethaddr, reader, writer, srvipaddr)
+        await establish_channel(srvethaddr, reader, writer, node, srvipaddr)
     finally:
         writer.close()

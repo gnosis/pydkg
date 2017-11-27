@@ -23,17 +23,16 @@ def encrypt(message: bytes, enckey: (int, int)) -> bytes:
             int.from_bytes(sha3.keccak_256(kE + iv + i.to_bytes(32, 'big')).digest(), 'big')
         ).to_bytes(32, byteorder='big') for i in range(num_chunks))
 
-
     # Quote from http://keccak.noekeon.org/:
     # Unlike SHA-1 and SHA-2, Keccak does not have the length-extension weakness,
     # hence does not need the HMAC nested construction. Instead, MAC computation
     # can be performed by simply prepending the message with the key.
     d = sha3.keccak_256(kM + c).digest()
-    return (util.curve_point_to_bytes(R) + # 64 byte ephemeral key
-            bytes((num_trunc_bytes,)) + # 1 byte truncation descriptor
-            iv + # 32 byte initialization vector
-            c + # arbitrary length 32 byte aligned enciphered message
-            d) # 32 byte message authentication code (MAC)
+    return (util.curve_point_to_bytes(R) +  # 64 byte ephemeral key
+            bytes((num_trunc_bytes,)) +  # 1 byte truncation descriptor
+            iv +  # 32 byte initialization vector
+            c +  # arbitrary length 32 byte aligned enciphered message
+            d)  # 32 byte message authentication code (MAC)
 
 
 def decrypt(ciphertext: bytes, deckey: int, foo=False) -> bytes:

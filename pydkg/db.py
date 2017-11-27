@@ -1,10 +1,7 @@
-import math
-
 import sqlalchemy.types as types
 from sqlalchemy import create_engine
-from sqlalchemy.orm import scoped_session, sessionmaker, relationship
-from sqlalchemy import Column, Integer, String, Enum, ForeignKey
-from sqlalchemy.schema import UniqueConstraint
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy import Column, Integer
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 
 from . import util
@@ -16,6 +13,7 @@ class Base(object):
         return cls.__name__.lower()
 
     id = Column(Integer, primary_key=True)
+
 
 Base = declarative_base(cls=Base)
 
@@ -42,7 +40,7 @@ class PrivateValue(types.TypeDecorator):
 
 class CurvePoint(types.TypeDecorator):
     impl = types.LargeBinary
-    python_type = tuple # (int, int)
+    python_type = tuple  # (int, int)
 
     def process_bind_param(self, value, dialect):
         if value is not None:
@@ -55,7 +53,7 @@ class CurvePoint(types.TypeDecorator):
 
 class Signature(types.TypeDecorator):
     impl = types.LargeBinary
-    python_type = tuple # rsv (int, int, int)
+    python_type = tuple  # rsv (int, int, int)
 
     def process_bind_param(self, value, dialect):
         if value is not None:
@@ -94,7 +92,7 @@ class Polynomial(types.TypeDecorator):
 
 class CurvePointTuple(types.TypeDecorator):
     impl = types.LargeBinary
-    python_type = tuple # of int pairs
+    python_type = tuple  # of int pairs
 
     def process_bind_param(self, value, dialect):
         if value is not None:

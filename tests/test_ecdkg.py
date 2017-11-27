@@ -47,6 +47,7 @@ def Popen_with_interrupt_at_exit(cmdargs, *args, **kwargs):
                     except subprocess.TimeoutExpired:
                         continue
 
+
 @pytest.fixture
 def nodes(num_ecdkg_nodes, request_timeout):
     subprocess.check_call((BIN_NAME, '-h'), stdout=subprocess.DEVNULL)
@@ -80,7 +81,10 @@ def nodes(num_ecdkg_nodes, request_timeout):
             # TODO: Figure out why channels randomly do not get set up with tighter timing
             time.sleep(0.1)
 
-        yield tuple(NodeInfo(process=proc, private_key=privkey, port=PORTS_START+i) for i, (proc, privkey) in enumerate(zip(processes, private_keys)))
+        yield tuple(
+            NodeInfo(process=proc, private_key=privkey, port=PORTS_START+i)
+            for i, (proc, privkey) in enumerate(zip(processes, private_keys))
+        )
 
 
 def is_node_listening(node: NodeInfo):
@@ -104,13 +108,17 @@ def wait_for_all_nodes_connected(nodes, timeout):
     # each node connects to each other node
     timelimit = time.perf_counter() + timeout
 
-    while any(sum(1 for con in n.process.connections() if con.status == psutil.CONN_ESTABLISHED) != len(nodes)-1 for n in nodes):
+    while any(
+        sum(1 for con in n.process.connections() if con.status == psutil.CONN_ESTABLISHED) !=
+        len(nodes)-1
+        for n in nodes
+    ):
         if time.perf_counter() >= timelimit:
             print('wait_for_all_nodes_connected took longer than {} seconds'.format(timeout))
             print_diagnostics(nodes)
             break
 
-    time.sleep(.1) # TODO: remove requirement for waiting for channel establishment
+    time.sleep(.1)  # TODO: remove requirement for waiting for channel establishment
 
 
 def print_diagnostics(nodes):
@@ -150,7 +158,8 @@ def test_nodes_match_state(nodes, request_timeout):
     wait_for_all_nodes_listening(nodes, request_timeout)
 
     deccond = 'past {}'.format(datetime.utcnow().isoformat())
-    responses = [requests.post('http://localhost:{}'.format(n.port),
+    responses = [requests.post(
+        'http://localhost:{}'.format(n.port),
         verify=False,
         timeout=request_timeout,
         data=json.dumps({
@@ -166,7 +175,8 @@ def test_nodes_match_enckey_and_deckeys(nodes, request_timeout):
     wait_for_all_nodes_connected(nodes, request_timeout)
 
     deccond = 'past {}'.format(datetime.utcnow().isoformat())
-    enckeys = [requests.post('http://localhost:{}'.format(n.port),
+    enckeys = [requests.post(
+        'http://localhost:{}'.format(n.port),
         verify=False,
         timeout=request_timeout,
         data=json.dumps({
@@ -182,7 +192,8 @@ def test_nodes_match_enckey_and_deckeys(nodes, request_timeout):
 
     assert(all(ek == enckeys[0] for ek in enckeys[1:]))
 
-    deckeys = [requests.post('http://localhost:{}'.format(n.port),
+    deckeys = [requests.post(
+        'http://localhost:{}'.format(n.port),
         verify=False,
         timeout=request_timeout,
         data=json.dumps({
